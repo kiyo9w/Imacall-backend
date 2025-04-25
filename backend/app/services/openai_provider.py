@@ -43,4 +43,4 @@ class OpenAIProvider:
 
         except Exception as e:
             print(f"Error calling OpenAI API: {e}")
-            return "Sorry, I encountered an erro."
+            return "Sorry, I encountered an error."
