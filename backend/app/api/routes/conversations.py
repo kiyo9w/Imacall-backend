@@ -1,9 +1,10 @@
 # Placeholder for conversation management routes 
 
 import uuid
-from typing import Any
+from typing import Any, List, Sequence
+import logging # Add logging
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect
 from sqlmodel import Session
 
 from app.api.deps import SessionDep, CurrentUser
@@ -17,6 +18,7 @@ from app.models import (
 from app.services import ai_service
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
+logger = logging.getLogger(__name__) # Add logger
 
 
 @router.post("/", response_model=ConversationPublic, status_code=201)
@@ -96,10 +98,15 @@ def get_conversation_messages_route(
 
 @router.post("/{conversation_id}/messages", response_model=MessagePublic)
 def send_message(
-    *, session: SessionDep, current_user: CurrentUser, conversation_id: uuid.UUID, message_in: MessageCreate
+    *, 
+    session: SessionDep, 
+    current_user: CurrentUser, 
+    conversation_id: uuid.UUID, 
+    message_in: MessageCreate
 ) -> Any:
     """
-    Send a message from the user to a conversation and get an AI response.
+    Send a message from the user to the conversation.
+    Gets an AI response using the configured AI service.
     """
     conversation = crud.conversations.get_conversation(
         session=session, conversation_id=conversation_id
@@ -107,41 +114,56 @@ def send_message(
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
     if conversation.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not authorized to send messages to this conversation")
-    if not conversation.character: # Ensure character relationship is loaded or handle if None
-        # This might require adjusting how conversations are fetched or created if lazy loading isn't setup
-        # For now, assume it exists if conversation exists
-        raise HTTPException(status_code=500, detail="Character details missing for conversation")
+        raise HTTPException(status_code=403, detail="Not authorized for this conversation")
 
     # 1. Save the user's message
-    user_message = crud.conversations.create_message(
-        session=session,
-        message_create=message_in,
-        conversation_id=conversation_id,
+    user_message = crud.messages.create_message(
+        session=session, 
+        message_in=message_in, 
+        conversation_id=conversation_id, 
         sender=MessageSender.USER
     )
 
-    # 2. Prepare context and get AI response
-    # Get recent messages (including the one just sent by the user)
-    # Adjust limit as needed for AI context window
-    message_history = crud.conversations.get_conversation_messages(
-        session=session, conversation_id=conversation_id, limit=20
+    # 2. Get conversation history (limit to recent messages for context)
+    #    Adjust limit as needed for context window vs performance
+    history = crud.messages.get_messages_for_conversation(
+        session=session, conversation_id=conversation_id, limit=20 # Example limit
     )
+    # Ensure history includes the new user message
+    # history.append(user_message) # crud already returns latest including user_message? check crud impl.
+    # Let's assume crud.messages.get_messages_for_conversation gets the *latest* including the one just added.
 
-    ai_response_text = ai_service.get_ai_response(
-        character=conversation.character,
-        history=message_history
-    )
+    # 3. Call the AI service to get a response
+    # Ensure the character object is loaded for personality details
+    character = conversation.character # Assumes relationship is loaded or use crud
+    if not character:
+        # This shouldn't happen if conversation exists, but check
+        char = crud.characters.get_character(session=session, character_id=conversation.character_id)
+        if not char:
+             raise HTTPException(status_code=404, detail="Character for conversation not found")
+        character = char # Assign loaded character
 
-    # 3. Save the AI's message
-    ai_message = crud.conversations.create_message(
+    try:
+        ai_response_content = ai_service.get_ai_response(character=character, history=history)
+    except Exception as e:
+        logger.error(f"AI service failed for conv {conversation_id}: {e}", exc_info=True)
+        # Handle AI failure gracefully, maybe return the user message ID and an error indicator?
+        # For now, raise internal server error
+        raise HTTPException(status_code=500, detail="Failed to get AI response")
+
+    # 4. Save the AI's response
+    ai_message = crud.messages.create_message(
         session=session,
-        message_create=MessageCreate(content=ai_response_text),
+        # Create a MessageCreate object for the AI response
+        message_in=MessageCreate(content=ai_response_content, conversation_id=conversation_id),
         conversation_id=conversation_id,
         sender=MessageSender.AI
     )
 
-    # Return the AI's response message
+    # 5. Update conversation's last interaction time (optional but good for sorting)
+    crud.conversations.update_conversation_last_interaction(session=session, db_conversation=conversation)
+
+    # 6. Return the AI's message
     return ai_message
 
 
