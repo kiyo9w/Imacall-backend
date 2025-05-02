@@ -45,13 +45,13 @@ def start_conversation(
 
     # Optionally: Add the character's greeting message as the first AI message
     if character.greeting_message:
-        crud.conversations.create_message(
-            session=session,
-            message_create=MessageCreate(content=character.greeting_message),
+        greeting_message = Message(
+            content=character.greeting_message,
             conversation_id=conversation.id,
             sender=MessageSender.AI
         )
-        session.refresh(conversation) # Refresh to potentially load the new message relationship
+        session.add(greeting_message)
+        session.commit() # Commit the message
 
     return conversation
 
