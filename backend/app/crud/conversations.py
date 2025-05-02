@@ -2,6 +2,8 @@
 
 import uuid
 from typing import Sequence
+import datetime
+from datetime import timezone
 
 from sqlmodel import Session, select, func
 
@@ -63,6 +65,16 @@ def delete_conversation(*, session: Session, db_conversation: Conversation) -> N
     """Deletes a conversation and its associated messages (via cascade)."""
     session.delete(db_conversation)
     session.commit()
+
+
+def update_conversation_last_interaction(
+    *, session: Session, db_conversation: Conversation
+) -> None:
+    """Updates the last_interaction_at timestamp for a conversation."""
+    db_conversation.last_interaction_at = datetime.datetime.now(timezone.utc)
+    session.add(db_conversation)
+    session.commit()
+    # No need to refresh unless we need the updated object back immediately
 
 
 # --- Message CRUD ---

@@ -275,8 +275,8 @@ class MessageBase(SQLModel):
     conversation_id: uuid.UUID = Field(foreign_key="conversation.id")
 
 
-class MessageCreate(MessageBase):
-    pass  # Content is the main input
+class MessageCreate(SQLModel):
+    content: str = Field(max_length=5000)
 
 
 # Database model

@@ -117,21 +117,21 @@ def send_message(
         raise HTTPException(status_code=403, detail="Not authorized for this conversation")
 
     # 1. Save the user's message
-    user_message = crud.messages.create_message(
+    user_message = crud.conversations.create_message(
         session=session, 
-        message_in=message_in, 
+        message_create=message_in,
         conversation_id=conversation_id, 
         sender=MessageSender.USER
     )
 
     # 2. Get conversation history (limit to recent messages for context)
     #    Adjust limit as needed for context window vs performance
-    history = crud.messages.get_messages_for_conversation(
+    history = crud.conversations.get_conversation_messages(
         session=session, conversation_id=conversation_id, limit=20 # Example limit
     )
     # Ensure history includes the new user message
     # history.append(user_message) # crud already returns latest including user_message? check crud impl.
-    # Let's assume crud.messages.get_messages_for_conversation gets the *latest* including the one just added.
+    # Let's assume crud.conversations.get_conversation_messages gets the *latest* including the one just added.
 
     # 3. Call the AI service to get a response
     # Ensure the character object is loaded for personality details
@@ -152,10 +152,9 @@ def send_message(
         raise HTTPException(status_code=500, detail="Failed to get AI response")
 
     # 4. Save the AI's response
-    ai_message = crud.messages.create_message(
+    ai_message = crud.conversations.create_message(
         session=session,
-        # Create a MessageCreate object for the AI response
-        message_in=MessageCreate(content=ai_response_content, conversation_id=conversation_id),
+        message_create=MessageCreate(content=ai_response_content),
         conversation_id=conversation_id,
         sender=MessageSender.AI
     )
