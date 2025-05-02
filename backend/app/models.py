@@ -3,8 +3,10 @@ import datetime
 from enum import Enum
 from typing import List, Optional
 from datetime import timezone
+import re # Import re for parsing tags string
+import json # Import json for safer parsing if possible
 
-from pydantic import EmailStr
+from pydantic import EmailStr, field_validator
 from sqlmodel import Field, Relationship, SQLModel, Column, Text
 
 
@@ -133,14 +135,15 @@ class CharacterStatus(str, Enum):
 # Shared properties
 class CharacterBase(SQLModel):
     name: str = Field(index=True, max_length=100)
-    description: str | None = Field(default=None, index=True)
+    description: str | None = Field(default=None, sa_column=Column(Text))
     image_url: str | None = None
-    greeting_message: str | None = None
+    greeting_message: str | None = Field(default=None, sa_column=Column(Text))
     # V1 Detail Fields
     scenario: str | None = Field(default=None, sa_column=Column(Text))
     category: str | None = Field(default=None, index=True)
-    language: str | None = Field(default=None, index=True) # e.g., "en", "es"
-    tags: list[str] | None = Field(default=None, sa_column=Column(Text)) # Store as JSON/Text, handle serialization if needed
+    language: str | None = Field(default=None, index=True)
+    # Store as JSON/Text, handle serialization if needed - adjusted type hint and added validator
+    tags: list[str] | str | None = Field(default=None, sa_column=Column(Text))
     voice_id: str | None = Field(default=None) # For TTS service integration
     # V3 Personality Fields
     personality_traits: str | None = Field(default=None, sa_column=Column(Text)) # E.g., "Curious, Witty, Cautious" or detailed description
@@ -157,6 +160,33 @@ class CharacterBase(SQLModel):
     is_featured: bool = Field(default=False)
     admin_feedback: str | None = Field(default=None, sa_column=Column(Text)) # Feedback on rejection/changes
 
+    @field_validator("tags", mode="before")
+    @classmethod
+    def parse_tags(cls, v):
+        if isinstance(v, str):
+            # Handle PostgreSQL array string format '{tag1,tag2}' or JSON string '["tag1", "tag2"]' or simple comma-separated 'tag1,tag2'
+            if v.startswith('{') and v.endswith('}'):
+                # Attempt to parse PostgreSQL-style array string: {tag1,"tag 2",tag3}
+                # This simple regex handles basic cases without escaped commas/quotes within tags
+                tags = re.findall(r'[^",\s][^,"]*[^",\s]*', v.strip('{}'))
+                # Strip quotes if present (handles "{'tag1','tag2'}" or '{"tag1","tag2"}')
+                return [tag.strip('\'"') for tag in tags if tag]
+            elif v.startswith('[') and v.endswith(']'):
+                # Attempt to parse as JSON list
+                try:
+                    return json.loads(v)
+                except json.JSONDecodeError:
+                    # Fallback for malformed JSON - treat as single tag? or return empty?
+                     return [v] # Or raise ValueError? For now, treat as single tag.
+            else:
+                 # Assume comma-separated string: "tag1, tag2, tag3"
+                 return [tag.strip() for tag in v.split(',') if tag.strip()]
+        elif isinstance(v, list):
+            # Already a list, ensure elements are strings
+            return [str(item) for item in v]
+        # Handle None or other types gracefully
+        return v
+
 
 # Properties to receive via API on creation (user submission)
 class CharacterCreate(CharacterBase):
@@ -167,7 +197,7 @@ class CharacterCreate(CharacterBase):
 class CharacterUpdate(SQLModel):
     # Only include fields a user OR admin might update
     # Admin might update more via a separate schema if needed, but let's keep it simple for now
-    name: str | None = None
+    name: str | None = Field(default=None, max_length=100) # Keep max_length for name
     description: str | None = None
     image_url: str | None = None
     greeting_message: str | None = None
