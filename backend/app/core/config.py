@@ -118,6 +118,11 @@ class Settings(BaseSettings):
     FIRST_SUPERUSER: EmailStr
     FIRST_SUPERUSER_PASSWORD: str
 
+    USERS_OPEN_REGISTRATION: bool = True
+    GEMINI_API_KEY: str | None = None
+    OPENAI_API_KEY: str | None = None
+    CLAUDE_API_KEY: str | None = None
+
     def _check_default_secret(self, var_name: str, value: str | None) -> None:
         if value == "changethis":
             message = (
