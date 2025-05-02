@@ -5,6 +5,10 @@ from starlette.middleware.cors import CORSMiddleware
 
 from app.api.main import api_router
 from app.core.config import settings
+from app.api.routes import (login, users, utils, items, characters, 
+                                conversations, admin_characters)
+# Add the new config router
+from app.api.routes import config as config_router
 
 
 def custom_generate_unique_id(route: APIRoute) -> str:
@@ -31,3 +35,18 @@ if settings.all_cors_origins:
     )
 
 app.include_router(api_router, prefix=settings.API_V1_STR)
+# Add the new config router
+app.include_router(config_router.router, prefix=settings.API_V1_STR)
+
+app.include_router(login.router, tags=["login"])
+app.include_router(users.router, prefix=settings.API_V1_STR, tags=["users"])
+app.include_router(utils.router, prefix=settings.API_V1_STR, tags=["utils"])
+app.include_router(items.router, prefix=settings.API_V1_STR, tags=["items"])
+app.include_router(characters.router, prefix=settings.API_V1_STR, tags=["characters"])
+app.include_router(conversations.router, prefix=settings.API_V1_STR, tags=["conversations"])
+app.include_router(admin_characters.router, prefix=settings.API_V1_STR, tags=["admin-characters"])
+
+# Health check endpoint (optional, can be part of utils)
+@app.get("/health", tags=["health"])
+def health_check():
+    return {"status": "ok"}
