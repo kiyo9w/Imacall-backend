@@ -1,4 +1,5 @@
 import sentry_sdk
+import asyncio
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
 from starlette.middleware.cors import CORSMiddleware
@@ -66,3 +67,19 @@ def api_v1_root():
 @app.get("/health", tags=["health"])
 def health_check():
     return {"status": "ok"}
+
+# WebSocket health check endpoint
+@app.websocket("/ws-health")
+async def websocket_health_endpoint(websocket):
+    # Immediately accept the connection
+    await websocket.accept()
+    
+    # Send a welcome message
+    await websocket.send_json({
+        "status": "ok",
+        "message": "WebSocket server is healthy"
+    })
+    
+    # Keep the connection open briefly then close it properly
+    await asyncio.sleep(1)
+    await websocket.close()
