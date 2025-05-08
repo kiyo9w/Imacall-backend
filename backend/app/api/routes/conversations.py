@@ -85,7 +85,10 @@ async def get_user_from_token(
     token: str = Query(None)
 ) -> Optional[User]:
     """Authenticate WebSocket connection using token query parameter."""
+    logger.info(f"WebSocket auth: Starting authentication process with token: {token[:10]}..." if token else "WebSocket auth: No token provided")
+    
     if not token:
+        logger.error("WebSocket auth failed: No token provided")
         return None
     
     import jwt
@@ -96,19 +99,36 @@ async def get_user_from_token(
     from pydantic import ValidationError
     
     try:
+        logger.info(f"WebSocket auth: Decoding token with SECRET_KEY")
+        
         # Decode the token using the same method as in get_current_user
         payload = jwt.decode(
             token, settings.SECRET_KEY, algorithms=[security.ALGORITHM]
         )
         token_data = TokenPayload(**payload)
         
+        logger.info(f"WebSocket auth: Token decoded successfully, user_id={token_data.sub}")
+        
+        # Get the user from database
         user = session.get(User, token_data.sub)
-        if not user or not user.is_active:
+        if not user:
+            logger.error(f"WebSocket auth failed: User {token_data.sub} not found in database")
             return None
             
+        if not user.is_active:
+            logger.error(f"WebSocket auth failed: User {user.id} is not active")
+            return None
+        
+        logger.info(f"WebSocket auth successful: User {user.id} authenticated")    
         return user
-    except (InvalidTokenError, ValidationError, Exception) as e:
-        logger.error(f"WebSocket authentication error: {e}")
+    except InvalidTokenError as e:
+        logger.error(f"WebSocket auth failed: JWT validation error: {str(e)}")
+        return None
+    except ValidationError as e:
+        logger.error(f"WebSocket auth failed: Payload validation error: {str(e)}")
+        return None
+    except Exception as e:
+        logger.error(f"WebSocket auth failed: Unexpected error: {str(e)}", exc_info=True)
         return None
 
 # WebSocket endpoint for conversation messages
@@ -119,12 +139,20 @@ async def websocket_endpoint(
     session: Session = Depends(SessionDep),
     token: str = Query(None)
 ):
+    """WebSocket endpoint for real-time messaging in a conversation."""
+    logger.info(f"WebSocket connection attempt for conversation: {conversation_id}")
+    
+    await websocket.accept()
+    
     # Authenticate the WebSocket connection
     user = await get_user_from_token(websocket, session, token)
     if not user:
         logger.error(f"WebSocket auth failed: Invalid or missing token for conversation {conversation_id}")
+        await websocket.send_json({"type": "error", "data": {"message": "Authentication failed"}})
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
+    
+    logger.info(f"WS: User {user.id} authenticated, checking conversation access")
     
     # Check if conversation exists and user has access
     conversation = crud.conversations.get_conversation(
@@ -134,21 +162,43 @@ async def websocket_endpoint(
     # Log detailed information about the access issue
     if not conversation:
         logger.error(f"WebSocket connection rejected: Conversation {conversation_id} not found")
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-        return
-        
-    if conversation.user_id != user.id:
-        logger.error(f"WebSocket permission denied: User {user.id} attempted to access conversation {conversation_id} owned by {conversation.user_id}")
+        await websocket.send_json({"type": "error", "data": {"message": "Conversation not found"}})
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
     
+    # Convert UUIDs to strings for comparison
+    user_id_str = str(user.id)
+    conversation_user_id_str = str(conversation.user_id)
+    
+    logger.info(f"WS access check: User ID={user_id_str}, Conversation owner ID={conversation_user_id_str}")
+    
+    # Perform the ownership check
+    if user_id_str != conversation_user_id_str:
+        logger.error(f"WebSocket permission denied: User {user_id_str} attempted to access conversation {conversation_id} owned by {conversation_user_id_str}")
+        await websocket.send_json({"type": "error", "data": {"message": "You don't have permission to access this conversation"}})
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+    
+    logger.info(f"WS: Access granted to user {user_id_str} for conversation {conversation_id}")
+    
     # Accept connection and store it
     await manager.connect(websocket, conversation_id, user.id)
+    logger.info(f"WebSocket connection established for user {user.id} on conversation {conversation_id}")
+    
+    # Send initial connection confirmation
+    await websocket.send_json({
+        "type": "connected",
+        "data": {
+            "message": "WebSocket connection established",
+            "conversation_id": str(conversation_id)
+        }
+    })
     
     try:
         while True:
             # Wait for messages from the client
             data = await websocket.receive_json()
+            logger.info(f"WS: Received message from user {user.id}: {data.get('type', 'unknown')}")
             
             # Handle different message types
             message_type = data.get("type", "text")
@@ -167,15 +217,25 @@ async def websocket_endpoint(
                 await websocket.send_json({"type": "pong", "timestamp": datetime.now().isoformat()})
             else:
                 # Unknown message type
+                logger.warning(f"WS: Unknown message type: {message_type}")
                 await websocket.send_json({
                     "type": "error",
                     "data": {"message": f"Unknown message type: {message_type}"}
                 })
     
     except WebSocketDisconnect:
+        logger.info(f"WebSocket disconnected: User {user.id}, conversation {conversation_id}")
+        manager.disconnect(conversation_id, user.id)
+    except json.JSONDecodeError:
+        logger.error(f"WebSocket error: Invalid JSON received from user {user.id}")
+        await websocket.send_json({"type": "error", "data": {"message": "Invalid message format"}})
         manager.disconnect(conversation_id, user.id)
     except Exception as e:
         logger.error(f"WebSocket error: {e}", exc_info=True)
+        try:
+            await websocket.send_json({"type": "error", "data": {"message": "Server error occurred"}})
+        except:
+            pass
         manager.disconnect(conversation_id, user.id)
 
 # Handler for text messages
@@ -190,101 +250,139 @@ async def handle_text_message(
     # Extract message content
     content = data.get("content", "").strip()
     if not content:
+        logger.warning(f"WS: Empty message content received from user {user.id}")
         return
     
-    # Create and save user message
-    user_message = crud.conversations.create_message(
-        session=session,
-        message_create=MessageCreate(content=content),
-        conversation_id=conversation_id,
-        sender=MessageSender.USER
-    )
-    
-    # Send confirmation of received message
-    user_message_data = {
-        "type": "message",
-        "data": {
-            "id": str(user_message.id),
-            "content": user_message.content,
-            "conversation_id": str(user_message.conversation_id),
-            "sender": user_message.sender,
-            "timestamp": user_message.timestamp.isoformat()
-        }
-    }
-    await manager.send_message(conversation_id, user.id, user_message_data)
-    
-    # Get conversation history for AI context
-    history = crud.conversations.get_conversation_messages(
-        session=session, conversation_id=conversation_id, limit=20
-    )
-    
-    # Get character for AI response
-    character = crud.characters.get_character(
-        session=session, character_id=conversation.character_id
-    )
-    if not character:
-        error_msg = {
-            "type": "error",
-            "data": {"message": "Character not found"}
-        }
-        await manager.send_message(conversation_id, user.id, error_msg)
-        return
-    
-    # Inform client that AI is generating a response
-    typing_notification = {
-        "type": "typing",
-        "data": {"character_id": str(character.id), "is_typing": True}
-    }
-    await manager.send_message(conversation_id, user.id, typing_notification)
+    logger.info(f"WS: Processing text message from user {user.id} in conversation {conversation_id}")
     
     try:
-        # Process AI response in background to not block the WebSocket
-        ai_response_content = await asyncio.to_thread(
-            ai_service.get_ai_response,
-            character=character,
-            history=history
-        )
-        
-        # Create and save AI message
-        ai_message = crud.conversations.create_message(
+        # Create and save user message
+        user_message = crud.conversations.create_message(
             session=session,
-            message_create=MessageCreate(content=ai_response_content),
+            message_create=MessageCreate(content=content),
             conversation_id=conversation_id,
-            sender=MessageSender.AI
+            sender=MessageSender.USER
         )
         
-        # Update last interaction time
-        crud.conversations.update_conversation_last_interaction(
-            session=session, db_conversation=conversation
-        )
+        logger.info(f"WS: User message saved with ID {user_message.id}")
         
-        # Send AI response to user
-        ai_message_data = {
+        # Send confirmation of received message
+        user_message_data = {
             "type": "message",
             "data": {
-                "id": str(ai_message.id),
-                "content": ai_message.content,
-                "conversation_id": str(ai_message.conversation_id),
-                "sender": ai_message.sender,
-                "timestamp": ai_message.timestamp.isoformat()
+                "id": str(user_message.id),
+                "content": user_message.content,
+                "conversation_id": str(user_message.conversation_id),
+                "sender": user_message.sender,
+                "timestamp": user_message.timestamp.isoformat()
             }
         }
-        await manager.send_message(conversation_id, user.id, ai_message_data)
+        send_result = await manager.send_message(conversation_id, user.id, user_message_data)
+        if not send_result:
+            logger.warning(f"WS: Failed to confirm message receipt to user {user.id}")
         
-        # Send typing stopped notification
-        typing_stopped = {
+        # Get conversation history for AI context
+        logger.info(f"WS: Fetching message history for conversation {conversation_id}")
+        history = crud.conversations.get_conversation_messages(
+            session=session, conversation_id=conversation_id, limit=20
+        )
+        
+        # Get character for AI response
+        character = crud.characters.get_character(
+            session=session, character_id=conversation.character_id
+        )
+        if not character:
+            logger.error(f"WS: Character {conversation.character_id} not found for conversation {conversation_id}")
+            error_msg = {
+                "type": "error",
+                "data": {"message": "Character not found"}
+            }
+            await manager.send_message(conversation_id, user.id, error_msg)
+            return
+        
+        logger.info(f"WS: Using character {character.id} ({character.name}) for AI response")
+        
+        # Inform client that AI is generating a response
+        typing_notification = {
             "type": "typing",
-            "data": {"character_id": str(character.id), "is_typing": False}
+            "data": {"character_id": str(character.id), "is_typing": True}
         }
-        await manager.send_message(conversation_id, user.id, typing_stopped)
+        await manager.send_message(conversation_id, user.id, typing_notification)
         
+        try:
+            # Process AI response in background to not block the WebSocket
+            logger.info(f"WS: Getting AI response from service for user {user.id}")
+            ai_response_content = await asyncio.to_thread(
+                ai_service.get_ai_response,
+                character=character,
+                history=history
+            )
+            
+            logger.info(f"WS: AI response generated: {ai_response_content[:50]}...")
+            
+            # Create and save AI message
+            ai_message = crud.conversations.create_message(
+                session=session,
+                message_create=MessageCreate(content=ai_response_content),
+                conversation_id=conversation_id,
+                sender=MessageSender.AI
+            )
+            
+            logger.info(f"WS: AI message saved with ID {ai_message.id}")
+            
+            # Update last interaction time
+            crud.conversations.update_conversation_last_interaction(
+                session=session, db_conversation=conversation
+            )
+            
+            # Send AI response to user
+            ai_message_data = {
+                "type": "message",
+                "data": {
+                    "id": str(ai_message.id),
+                    "content": ai_message.content,
+                    "conversation_id": str(ai_message.conversation_id),
+                    "sender": ai_message.sender,
+                    "timestamp": ai_message.timestamp.isoformat()
+                }
+            }
+            send_result = await manager.send_message(conversation_id, user.id, ai_message_data)
+            if not send_result:
+                logger.warning(f"WS: Failed to send AI response to user {user.id}")
+            else:
+                logger.info(f"WS: AI response sent successfully to user {user.id}")
+            
+            # Send typing stopped notification
+            typing_stopped = {
+                "type": "typing",
+                "data": {"character_id": str(character.id), "is_typing": False}
+            }
+            await manager.send_message(conversation_id, user.id, typing_stopped)
+            
+        except Exception as e:
+            logger.error(f"WS: Error generating AI response: {e}", exc_info=True)
+            error_msg = {
+                "type": "error",
+                "data": {"message": "Failed to generate AI response"}
+            }
+            await manager.send_message(conversation_id, user.id, error_msg)
+            
+            # Make sure to stop typing indicator
+            typing_stopped = {
+                "type": "typing",
+                "data": {"character_id": str(character.id), "is_typing": False}
+            }
+            await manager.send_message(conversation_id, user.id, typing_stopped)
     except Exception as e:
-        logger.error(f"Error generating AI response: {e}", exc_info=True)
-        error_msg = {
-            "type": "error",
-            "data": {"message": "Failed to generate AI response"}
-        }
-        await manager.send_message(conversation_id, user.id, error_msg)
+        logger.error(f"WS: Unexpected error in handle_text_message: {e}", exc_info=True)
+        try:
+            error_msg = {
+                "type": "error",
+                "data": {"message": "Server error while processing your message"}
+            }
+            await manager.send_message(conversation_id, user.id, error_msg)
+        except Exception as send_error:
+            logger.error(f"WS: Failed to send error message: {send_error}")
 
 # Placeholder for voice call request handling
 async def handle_voice_call_request(
