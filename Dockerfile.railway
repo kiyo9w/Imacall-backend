@@ -2,23 +2,21 @@ FROM python:3.10
 
 WORKDIR /app
 
-# Copy requirements
-COPY backend/pyproject.toml backend/uv.lock /app/
-COPY backend/scripts /app/scripts/
-COPY backend/alembic.ini /app/
-
-# Install dependencies
-RUN pip install --no-cache-dir uv && \
-    uv pip install --system --no-cache -r pyproject.toml
-
 # Set environment
 ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app
 
-# Copy backend files
+# Copy backend application code and requirements
 COPY backend/app /app/app
+COPY backend/scripts /app/scripts
+COPY backend/requirements.txt /app/
+COPY backend/alembic.ini /app/
 COPY backend/docker-entrypoint.sh /app/docker-entrypoint.sh
-RUN chmod +x /app/docker-entrypoint.sh
+
+# Install dependencies 
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install alembic && \
+    chmod +x /app/docker-entrypoint.sh
 
 # Expose the application port
 EXPOSE 8000
