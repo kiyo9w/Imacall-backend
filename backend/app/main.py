@@ -25,82 +25,40 @@ app = FastAPI(
 )
 
 # Set all CORS enabled origins
-if settings.all_cors_origins:
+if settings.BACKEND_CORS_ORIGINS:
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.all_cors_origins,
+        allow_origins=[str(origin) for origin in settings.BACKEND_CORS_ORIGINS],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
-# Allow any host for WebSocket connections - critical for Render.com
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])
+# Add TrustedHostMiddleware
+app.add_middleware(
+    TrustedHostMiddleware, allowed_hosts=["*"]
+)
 
-# Include all routes via the api_router
+# Mount the API router with the correct prefix (crucial for compatibility with frontend)
 app.include_router(api_router, prefix=settings.API_V1_STR)
-# Add the config router separately since it's not in api_router
-app.include_router(config_router.router, prefix=settings.API_V1_STR)
 
-# Remove redundant router registrations
-# These are already included via api_router above
+# Add a basic health check for the root path
+@app.get("/")
+def root():
+    return {"message": "Welcome to Imacall API! Use /api/v1/ prefix for all endpoints."}
 
-# Health check endpoint (non-prefixed for kubernetes/monitoring access)
-@app.get("/health", tags=["health"])
-def health_check():
-    return {"status": "ok"}
-
-# Add a WebSocket health check endpoint to verify WebSocket functionality
+# WebSocket health check endpoint
 @app.websocket("/ws-health")
-async def websocket_health_check(websocket):
-    # Always accept the connection first - critical for Render.com
+async def websocket_health_endpoint(websocket):
+    # Immediately accept the connection
     await websocket.accept()
     
-    try:
-        # Send a welcome message
-        await websocket.send_json({
-            "status": "ok", 
-            "message": "WebSocket connection established",
-            "environment": str(settings.ENVIRONMENT)
-        })
-        
-        # Wait for an optional message from the client
-        try:
-            data = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
-            await websocket.send_json({
-                "status": "echo",
-                "message": f"Echoed: {data}"
-            })
-        except Exception:
-            # Timeout or other error is fine here, just proceed to close
-            pass
-            
-        # Gracefully close
-        await websocket.close()
-    except Exception as e:
-        print(f"WebSocket health check error: {e}")
-        try:
-            await websocket.close(code=1011, reason=str(e))
-        except:
-            pass
-
-# Also add the health endpoint at the API prefix
-@app.websocket(f"{settings.API_V1_STR}/ws-health")
-async def websocket_health_check_api(websocket):
-    # Always accept the connection first - critical for Render.com
-    await websocket.accept()
+    # Send a welcome message
+    await websocket.send_json({
+        "status": "ok",
+        "message": "WebSocket server is healthy"
+    })
     
-    try:
-        # Send a welcome message with API prefix
-        await websocket.send_json({
-            "status": "ok", 
-            "message": "WebSocket connection established via API prefix",
-            "environment": str(settings.ENVIRONMENT)
-        })
-        await websocket.close()
-    except Exception as e:
-        print(f"API WebSocket health check error: {e}")
-        try:
-            await websocket.close(code=1011, reason=str(e))
-        except:
-            pass
+    # Keep the connection open briefly then close it properly
+    await asyncio.sleep(1)
+    await websocket.close()
