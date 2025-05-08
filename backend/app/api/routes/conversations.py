@@ -122,6 +122,7 @@ async def websocket_endpoint(
     # Authenticate the WebSocket connection
     user = await get_user_from_token(websocket, session, token)
     if not user:
+        logger.error(f"WebSocket auth failed: Invalid or missing token for conversation {conversation_id}")
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
     
@@ -129,7 +130,15 @@ async def websocket_endpoint(
     conversation = crud.conversations.get_conversation(
         session=session, conversation_id=conversation_id
     )
-    if not conversation or conversation.user_id != user.id:
+    
+    # Log detailed information about the access issue
+    if not conversation:
+        logger.error(f"WebSocket connection rejected: Conversation {conversation_id} not found")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+        
+    if conversation.user_id != user.id:
+        logger.error(f"WebSocket permission denied: User {user.id} attempted to access conversation {conversation_id} owned by {conversation.user_id}")
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
     

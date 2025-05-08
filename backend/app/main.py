@@ -5,9 +5,7 @@ from starlette.middleware.cors import CORSMiddleware
 
 from app.api.main import api_router
 from app.core.config import settings
-from app.api.routes import (login, users, utils, items, characters, 
-                                conversations, admin_characters)
-# Add the new config router
+# Remove redundant imports since they're already included in api_router
 from app.api.routes import config as config_router
 
 
@@ -34,19 +32,15 @@ if settings.all_cors_origins:
         allow_headers=["*"],
     )
 
+# Include all routes via the api_router
 app.include_router(api_router, prefix=settings.API_V1_STR)
-# Add the new config router
+# Add the config router separately since it's not in api_router
 app.include_router(config_router.router, prefix=settings.API_V1_STR)
 
-app.include_router(login.router, tags=["login"])
-app.include_router(users.router, prefix=settings.API_V1_STR, tags=["users"])
-app.include_router(utils.router, prefix=settings.API_V1_STR, tags=["utils"])
-app.include_router(items.router, prefix=settings.API_V1_STR, tags=["items"])
-app.include_router(characters.router, prefix=settings.API_V1_STR, tags=["characters"])
-app.include_router(conversations.router, prefix=settings.API_V1_STR, tags=["conversations"])
-app.include_router(admin_characters.router, prefix=settings.API_V1_STR, tags=["admin-characters"])
+# Remove redundant router registrations
+# These are already included via api_router above
 
-# Health check endpoint (optional, can be part of utils)
+# Health check endpoint (non-prefixed for kubernetes/monitoring access)
 @app.get("/health", tags=["health"])
 def health_check():
     return {"status": "ok"}
