@@ -7,23 +7,23 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app
 
 # Install PostgreSQL client for database connection checks
-RUN apt-get update && apt-get install -y postgresql-client && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y postgresql-client curl && rm -rf /var/lib/apt/lists/*
 
 # Copy backend application code and requirements
 COPY backend/app /app/app
 COPY backend/scripts /app/scripts
 COPY backend/requirements.txt /app/
 COPY backend/alembic.ini /app/
-COPY backend/docker-entrypoint.sh /app/docker-entrypoint.sh
 
 # Install dependencies 
 RUN pip install --no-cache-dir -r requirements.txt && \
-    pip install alembic && \
-    chmod +x /app/docker-entrypoint.sh
+    pip install alembic 
 
-# Add a retry mechanism for database connections
+# Add a robust entrypoint script
 RUN echo '#!/bin/bash\n\
 set -e\n\
+\n\
+echo "Starting Imacall backend on Railway..."\n\
 \n\
 # Define function for database connection with retries\n\
 function connect_to_db() {\n\
@@ -41,23 +41,36 @@ function connect_to_db() {\n\
     echo "Database connection failed after $max_retries retries!"\n\
     exit 1\n\
   fi\n\
-  echo "Database is available!"\n\
+  echo "${POSTGRES_SERVER:-postgres}:${POSTGRES_PORT:-5432} - accepting connections"\n\
 }\n\
 \n\
-# Run database migrations with retry mechanism\n\
-echo "Running database migrations..."\n\
+# Run database connection check\n\
 connect_to_db\n\
+\n\
+# Run the pre-start script to check DB health\n\
+if [ -f /app/app/backend_pre_start.py ]; then\n\
+  echo "Running backend pre-start script..."\n\
+  python /app/app/backend_pre_start.py\n\
+fi\n\
+\n\
+# Run database migrations\n\
+echo "Running database migrations..."\n\
 alembic upgrade head\n\
 \n\
+# Create initial data\n\
 echo "Creating initial data"\n\
 python -m app.initial_data\n\
 \n\
 echo "Migrations and initial data finished. Starting server..."\n\
-exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 4\n\
+\n\
+# Start uvicorn with appropriate settings for Railway\n\
+# Use PORT from environment (Railway sets this)\n\
+# Enable access to the uvicorn server from all interfaces with 0.0.0.0\n\
+exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080} --workers 4\n\
 ' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
 # Expose the application port
-EXPOSE 8000
+EXPOSE 8080
 
 # Use the entrypoint script
 ENTRYPOINT ["/app/entrypoint.sh"] 
