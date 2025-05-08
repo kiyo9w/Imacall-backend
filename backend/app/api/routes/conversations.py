@@ -141,102 +141,127 @@ async def websocket_endpoint(
 ):
     """WebSocket endpoint for real-time messaging in a conversation."""
     logger.info(f"WebSocket connection attempt for conversation: {conversation_id}")
+    logger.info(f"Headers: {websocket.headers}")
     
-    await websocket.accept()
-    
-    # Authenticate the WebSocket connection
-    user = await get_user_from_token(websocket, session, token)
-    if not user:
-        logger.error(f"WebSocket auth failed: Invalid or missing token for conversation {conversation_id}")
-        await websocket.send_json({"type": "error", "data": {"message": "Authentication failed"}})
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-        return
-    
-    logger.info(f"WS: User {user.id} authenticated, checking conversation access")
-    
-    # Check if conversation exists and user has access
-    conversation = crud.conversations.get_conversation(
-        session=session, conversation_id=conversation_id
-    )
-    
-    # Log detailed information about the access issue
-    if not conversation:
-        logger.error(f"WebSocket connection rejected: Conversation {conversation_id} not found")
-        await websocket.send_json({"type": "error", "data": {"message": "Conversation not found"}})
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-        return
-    
-    # Convert UUIDs to strings for comparison
-    user_id_str = str(user.id)
-    conversation_user_id_str = str(conversation.user_id)
-    
-    logger.info(f"WS access check: User ID={user_id_str}, Conversation owner ID={conversation_user_id_str}")
-    
-    # Perform the ownership check
-    if user_id_str != conversation_user_id_str:
-        logger.error(f"WebSocket permission denied: User {user_id_str} attempted to access conversation {conversation_id} owned by {conversation_user_id_str}")
-        await websocket.send_json({"type": "error", "data": {"message": "You don't have permission to access this conversation"}})
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-        return
-    
-    logger.info(f"WS: Access granted to user {user_id_str} for conversation {conversation_id}")
-    
-    # Accept connection and store it
-    await manager.connect(websocket, conversation_id, user.id)
-    logger.info(f"WebSocket connection established for user {user.id} on conversation {conversation_id}")
-    
-    # Send initial connection confirmation
-    await websocket.send_json({
-        "type": "connected",
-        "data": {
-            "message": "WebSocket connection established",
-            "conversation_id": str(conversation_id)
-        }
-    })
-    
+    # Accept the connection immediately - critical for Render.com
     try:
-        while True:
-            # Wait for messages from the client
-            data = await websocket.receive_json()
-            logger.info(f"WS: Received message from user {user.id}: {data.get('type', 'unknown')}")
-            
-            # Handle different message types
-            message_type = data.get("type", "text")
-            
-            if message_type == "text":
-                # Handle text messages (chat)
-                await handle_text_message(session, websocket, conversation, user, data, conversation_id)
-            elif message_type == "voice_call_request":
-                # Handle voice call initiation
-                await handle_voice_call_request(session, websocket, conversation, user, data, conversation_id)
-            elif message_type == "voice_call_end":
-                # Handle voice call termination
-                await handle_voice_call_end(session, websocket, conversation, user, data, conversation_id)
-            elif message_type == "ping":
-                # Simple ping to keep connection alive
-                await websocket.send_json({"type": "pong", "timestamp": datetime.now().isoformat()})
-            else:
-                # Unknown message type
-                logger.warning(f"WS: Unknown message type: {message_type}")
-                await websocket.send_json({
-                    "type": "error",
-                    "data": {"message": f"Unknown message type: {message_type}"}
-                })
-    
-    except WebSocketDisconnect:
-        logger.info(f"WebSocket disconnected: User {user.id}, conversation {conversation_id}")
-        manager.disconnect(conversation_id, user.id)
-    except json.JSONDecodeError:
-        logger.error(f"WebSocket error: Invalid JSON received from user {user.id}")
-        await websocket.send_json({"type": "error", "data": {"message": "Invalid message format"}})
-        manager.disconnect(conversation_id, user.id)
+        await websocket.accept()
+        logger.info(f"WebSocket connection accepted for initial handshake")
     except Exception as e:
-        logger.error(f"WebSocket error: {e}", exc_info=True)
+        logger.error(f"WebSocket accept error: {e}")
+        return
+        
+    # Authentication - after connection is established
+    try:
+        # Authenticate the WebSocket connection
+        user = await get_user_from_token(websocket, session, token)
+        if not user:
+            logger.error(f"WebSocket auth failed: Invalid or missing token for conversation {conversation_id}")
+            await websocket.send_json({
+                "type": "error", 
+                "data": {"message": "Authentication failed - invalid or missing token"}
+            })
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+        
+        logger.info(f"WS: User {user.id} authenticated successfully, checking conversation access")
+        
+        # Check if conversation exists and user has access
+        conversation = crud.conversations.get_conversation(
+            session=session, conversation_id=conversation_id
+        )
+        
+        # Log detailed information about the access issue
+        if not conversation:
+            logger.error(f"WebSocket connection rejected: Conversation {conversation_id} not found")
+            await websocket.send_json({
+                "type": "error", 
+                "data": {"message": "Conversation not found"}
+            })
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+        
+        # Convert UUIDs to strings for comparison
+        user_id_str = str(user.id)
+        conversation_user_id_str = str(conversation.user_id)
+        
+        logger.info(f"WS access check: User ID={user_id_str}, Conversation owner ID={conversation_user_id_str}")
+        
+        # Perform the ownership check
+        if user_id_str != conversation_user_id_str:
+            logger.error(f"WebSocket permission denied: User {user_id_str} attempted to access conversation {conversation_id} owned by {conversation_user_id_str}")
+            await websocket.send_json({
+                "type": "error", 
+                "data": {"message": "You don't have permission to access this conversation"}
+            })
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+        
+        logger.info(f"WS: Access granted to user {user_id_str} for conversation {conversation_id}")
+        
+        # Add connection to manager
+        await manager.connect(websocket, conversation_id, user.id)
+        logger.info(f"WebSocket connection established for user {user.id} on conversation {conversation_id}")
+        
+        # Send initial connection confirmation
+        await websocket.send_json({
+            "type": "connected",
+            "data": {
+                "message": "WebSocket connection established",
+                "conversation_id": str(conversation_id),
+                "user_id": user_id_str
+            }
+        })
+        
         try:
-            await websocket.send_json({"type": "error", "data": {"message": "Server error occurred"}})
+            while True:
+                # Wait for messages from the client
+                data = await websocket.receive_json()
+                logger.info(f"WS: Received message from user {user.id}: {data.get('type', 'unknown')}")
+                
+                # Handle different message types
+                message_type = data.get("type", "text")
+                
+                if message_type == "text":
+                    # Handle text messages (chat)
+                    await handle_text_message(session, websocket, conversation, user, data, conversation_id)
+                elif message_type == "voice_call_request":
+                    # Handle voice call initiation
+                    await handle_voice_call_request(session, websocket, conversation, user, data, conversation_id)
+                elif message_type == "voice_call_end":
+                    # Handle voice call termination
+                    await handle_voice_call_end(session, websocket, conversation, user, data, conversation_id)
+                elif message_type == "ping":
+                    # Simple ping to keep connection alive
+                    await websocket.send_json({"type": "pong", "timestamp": datetime.now().isoformat()})
+                else:
+                    # Unknown message type
+                    logger.warning(f"WS: Unknown message type: {message_type}")
+                    await websocket.send_json({
+                        "type": "error",
+                        "data": {"message": f"Unknown message type: {message_type}"}
+                    })
+        
+        except WebSocketDisconnect:
+            logger.info(f"WebSocket disconnected: User {user.id}, conversation {conversation_id}")
+            manager.disconnect(conversation_id, user.id)
+        except json.JSONDecodeError:
+            logger.error(f"WebSocket error: Invalid JSON received from user {user.id}")
+            await websocket.send_json({"type": "error", "data": {"message": "Invalid message format"}})
+            manager.disconnect(conversation_id, user.id)
+        except Exception as e:
+            logger.error(f"WebSocket error: {e}", exc_info=True)
+            try:
+                await websocket.send_json({"type": "error", "data": {"message": "Server error occurred"}})
+            except:
+                pass
+            manager.disconnect(conversation_id, user.id)
+    except Exception as e:
+        logger.error(f"WebSocket global error: {e}", exc_info=True)
+        try:
+            await websocket.close(code=1011)
         except:
             pass
-        manager.disconnect(conversation_id, user.id)
 
 # Handler for text messages
 async def handle_text_message(

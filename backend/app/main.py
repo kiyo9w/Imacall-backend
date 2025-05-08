@@ -1,7 +1,8 @@
 import sentry_sdk
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
-from starlette.middleware.cors import CORSMiddleware
+from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.api.main import api_router
 from app.core.config import settings
@@ -32,6 +33,9 @@ if settings.all_cors_origins:
         allow_headers=["*"],
     )
 
+# Allow any host for WebSocket connections - critical for Render.com
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])
+
 # Include all routes via the api_router
 app.include_router(api_router, prefix=settings.API_V1_STR)
 # Add the config router separately since it's not in api_router
@@ -44,3 +48,14 @@ app.include_router(config_router.router, prefix=settings.API_V1_STR)
 @app.get("/health", tags=["health"])
 def health_check():
     return {"status": "ok"}
+
+# Add a WebSocket health check endpoint to verify WebSocket functionality
+@app.websocket("/ws-health")
+async def websocket_health_check(websocket):
+    await websocket.accept()
+    try:
+        await websocket.send_json({"status": "ok", "message": "WebSocket connection established"})
+        await websocket.close()
+    except Exception as e:
+        print(f"WebSocket health check error: {e}")
+        await websocket.close(code=1011, reason=str(e))
