@@ -12,7 +12,9 @@ from app.api.routes import config as config_router
 
 
 def custom_generate_unique_id(route: APIRoute) -> str:
-    return f"{route.tags[0]}-{route.name}"
+    # Handle routes without tags by using 'root' as fallback tag
+    tag = route.tags[0] if route.tags else "root"
+    return f"{tag}-{route.name}"
 
 
 if settings.SENTRY_DSN and settings.ENVIRONMENT != "local":
