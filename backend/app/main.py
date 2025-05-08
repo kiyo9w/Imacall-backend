@@ -1,4 +1,5 @@
 import sentry_sdk
+import asyncio
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
 from fastapi.middleware.cors import CORSMiddleware
@@ -52,10 +53,54 @@ def health_check():
 # Add a WebSocket health check endpoint to verify WebSocket functionality
 @app.websocket("/ws-health")
 async def websocket_health_check(websocket):
+    # Always accept the connection first - critical for Render.com
     await websocket.accept()
+    
     try:
-        await websocket.send_json({"status": "ok", "message": "WebSocket connection established"})
+        # Send a welcome message
+        await websocket.send_json({
+            "status": "ok", 
+            "message": "WebSocket connection established",
+            "environment": str(settings.ENVIRONMENT)
+        })
+        
+        # Wait for an optional message from the client
+        try:
+            data = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
+            await websocket.send_json({
+                "status": "echo",
+                "message": f"Echoed: {data}"
+            })
+        except Exception:
+            # Timeout or other error is fine here, just proceed to close
+            pass
+            
+        # Gracefully close
         await websocket.close()
     except Exception as e:
         print(f"WebSocket health check error: {e}")
-        await websocket.close(code=1011, reason=str(e))
+        try:
+            await websocket.close(code=1011, reason=str(e))
+        except:
+            pass
+
+# Also add the health endpoint at the API prefix
+@app.websocket(f"{settings.API_V1_STR}/ws-health")
+async def websocket_health_check_api(websocket):
+    # Always accept the connection first - critical for Render.com
+    await websocket.accept()
+    
+    try:
+        # Send a welcome message with API prefix
+        await websocket.send_json({
+            "status": "ok", 
+            "message": "WebSocket connection established via API prefix",
+            "environment": str(settings.ENVIRONMENT)
+        })
+        await websocket.close()
+    except Exception as e:
+        print(f"API WebSocket health check error: {e}")
+        try:
+            await websocket.close(code=1011, reason=str(e))
+        except:
+            pass

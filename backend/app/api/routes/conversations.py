@@ -85,7 +85,7 @@ async def get_user_from_token(
     token: str = Query(None)
 ) -> Optional[User]:
     """Authenticate WebSocket connection using token query parameter."""
-    logger.info(f"WebSocket auth: Starting authentication process with token: {token[:10]}..." if token else "WebSocket auth: No token provided")
+    logger.info(f"WebSocket auth: Starting authentication process with token: {token[:10]}..." if token and len(token) > 10 else "WebSocket auth: No token or short token provided")
     
     if not token:
         logger.error("WebSocket auth failed: No token provided")
@@ -99,7 +99,7 @@ async def get_user_from_token(
     from pydantic import ValidationError
     
     try:
-        logger.info(f"WebSocket auth: Decoding token with SECRET_KEY")
+        logger.info(f"WebSocket auth: Decoding token with SECRET_KEY using {security.ALGORITHM} algorithm")
         
         # Decode the token using the same method as in get_current_user
         payload = jwt.decode(
@@ -143,14 +143,10 @@ async def websocket_endpoint(
     logger.info(f"WebSocket connection attempt for conversation: {conversation_id}")
     logger.info(f"Headers: {websocket.headers}")
     
-    # Accept the connection immediately - critical for Render.com
-    try:
-        await websocket.accept()
-        logger.info(f"WebSocket connection accepted for initial handshake")
-    except Exception as e:
-        logger.error(f"WebSocket accept error: {e}")
-        return
-        
+    # Accept the connection IMMEDIATELY - critical for Render.com
+    await websocket.accept()
+    logger.info(f"WebSocket connection accepted for initial handshake")
+    
     # Authentication - after connection is established
     try:
         # Authenticate the WebSocket connection
