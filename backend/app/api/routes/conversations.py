@@ -782,71 +782,73 @@ def poll_for_message(
     If last_message_id is provided, it ensures no duplicate messages are processed.
     """
     # Check if conversation exists and belongs to user
-    conversation = crud.conversations.get_conversation(session=session, conversation_id=conversation_id)
+    conversation = crud.conversations.get_conversation(
+        session=session, conversation_id=conversation_id
+    )
     if not conversation:
-        raise HTTPException(
-            status_code=404,
-            detail="Conversation not found"
-        )
+        raise HTTPException(status_code=404, detail="Conversation not found")
     if conversation.user_id != current_user.id:
-        raise HTTPException(
-            status_code=403,
-            detail="You don't have permission to access this conversation"
-        )
-    
-    # Get the character
-    character = crud.characters.get_character(session=session, character_id=conversation.character_id)
-    if not character:
-        raise HTTPException(
-            status_code=404,
-            detail="Character not found"
-        )
-    
+        raise HTTPException(status_code=403, detail="Not authorized for this conversation")
+
     # If last_message_id is provided, check if the message is already processed
     if last_message_id:
         # Get the last message in the conversation
-        latest_messages = crud.conversations.get_messages(
+        latest_messages = crud.conversations.get_conversation_messages(
             session=session, 
             conversation_id=conversation_id,
             skip=0,
-            limit=1
+            limit=2  # Get the last two messages
         )
-        if latest_messages and str(latest_messages[0].id) == str(last_message_id):
-            # We've already processed this message, just return the AI's last response
-            ai_messages = crud.conversations.get_messages(
-                session=session,
-                conversation_id=conversation_id,
-                skip=0,
-                limit=2,
-                sender="character"
-            )
-            if ai_messages:
-                return ai_messages[0]
+        # Check if we have messages and last message matches the provided ID
+        if latest_messages and any(str(msg.id) == str(last_message_id) for msg in latest_messages):
+            # Find the most recent AI message
+            for msg in reversed(latest_messages):
+                if msg.sender == MessageSender.AI or msg.sender == "character":
+                    return msg
     
-    # Save user's message
-    user_message = Message(
-        content=message_in.content,
-        conversation_id=conversation_id,
-        sender="user"
+    # 1. Save the user's message - use the same method as regular send_message
+    user_message = crud.conversations.create_message(
+        session=session, 
+        message_create=message_in,
+        conversation_id=conversation_id, 
+        sender=MessageSender.USER
     )
-    session.add(user_message)
-    session.commit()
-    session.refresh(user_message)
-    
-    # Generate AI response - use the same logic as the existing send_message endpoint
-    try:
-        # Use the existing logic from the regular message endpoint
-        # This ensures we're using the correct AI service and logic
-        message_handler = MessageHandler()
-        ai_message = message_handler.generate_ai_response(
-            session=session,
-            character=character,
-            conversation=conversation,
-            user_message=user_message,
-            user=current_user
+
+    # 2. Get conversation history (limit to recent messages for context)
+    history = crud.conversations.get_conversation_messages(
+        session=session, conversation_id=conversation_id, limit=20
+    )
+
+    # 3. Ensure the character object is loaded for personality details
+    character = conversation.character  # Try relationship first
+    if not character:
+        character = crud.characters.get_character(
+            session=session, character_id=conversation.character_id
         )
+        if not character:
+            raise HTTPException(status_code=404, detail="Character for conversation not found")
+
+    # 4. Call the AI service to get a response
+    try:
+        # Use the same AI service as the regular endpoint
+        ai_response_content = ai_service.get_ai_response(character=character, history=history)
         
+        # 5. Save the AI's response
+        ai_message = crud.conversations.create_message(
+            session=session,
+            message_create=MessageCreate(content=ai_response_content),
+            conversation_id=conversation_id,
+            sender=MessageSender.AI
+        )
+
+        # 6. Update conversation's last interaction time
+        crud.conversations.update_conversation_last_interaction(
+            session=session, db_conversation=conversation
+        )
+
+        # 7. Return the AI's message
         return ai_message
+        
     except Exception as e:
         logger.exception(f"Error generating AI response: {str(e)}")
         raise HTTPException(
@@ -903,7 +905,7 @@ def get_latest_messages(
             )
     else:
         # Get the latest messages
-        messages = crud.conversations.get_messages(
+        messages = crud.conversations.get_conversation_messages(
             session=session,
             conversation_id=conversation_id,
             skip=0,
@@ -917,7 +919,7 @@ class MessageHandler:
     def generate_ai_response(self, session, character, conversation, user_message, user):
         """Generate an AI response to a user message"""
         # Get conversation history
-        conversation_history = crud.conversations.get_messages(
+        conversation_history = crud.conversations.get_conversation_messages(
             session=session,
             conversation_id=conversation.id,
             skip=0,
