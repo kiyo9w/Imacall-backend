@@ -7,7 +7,7 @@ from starlette.middleware.cors import CORSMiddleware
 from app.api.main import api_router
 from app.core.config import settings
 from app.api.routes import (login, users, utils, items, characters, 
-                                conversations, admin_characters)
+                                conversations, admin_characters, ws_debug)
 # Add the new config router
 from app.api.routes import config as config_router
 
@@ -48,6 +48,7 @@ app.include_router(items.router, prefix=settings.API_V1_STR, tags=["items"])
 app.include_router(characters.router, prefix=settings.API_V1_STR, tags=["characters"])
 app.include_router(conversations.router, prefix=settings.API_V1_STR, tags=["conversations"])
 app.include_router(admin_characters.router, prefix=settings.API_V1_STR, tags=["admin-characters"])
+app.include_router(ws_debug.router, prefix=settings.API_V1_STR, tags=["ws-debug"])
 
 # Root endpoint for Railway health checks
 @app.get("/")
@@ -69,7 +70,7 @@ def health_check():
     return {"status": "ok"}
 
 # WebSocket health check endpoint
-@app.websocket("/ws-health")
+@app.websocket("/api/v1/utils/ws-health")
 async def websocket_health_endpoint(websocket):
     # Immediately accept the connection
     await websocket.accept()

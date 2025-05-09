@@ -122,6 +122,8 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str | None = None
     OPENAI_API_KEY: str | None = None
     CLAUDE_API_KEY: str | None = None
+    FPT_AI_API_KEY: str | None = None
+    OPENROUTER_API_KEY: str | None = None
 
     def _check_default_secret(self, var_name: str, value: str | None) -> None:
         if value == "changethis":
