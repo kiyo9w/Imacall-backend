@@ -142,122 +142,115 @@ async def websocket_endpoint(
     """WebSocket endpoint for real-time messaging in a conversation."""
     logger.info(f"WebSocket connection attempt for conversation: {conversation_id}")
     logger.info(f"Headers: {websocket.headers}")
+    logger.info(f"Query params: {websocket.query_params}")
     
-    # Accept the connection IMMEDIATELY - critical for Render.com
+    # Accept the connection IMMEDIATELY - critical for Railway and other cloud platforms
+    # This prevents 1006 errors by acknowledging the connection before authentication
     await websocket.accept()
-    logger.info(f"WebSocket connection accepted for initial handshake")
     
-    # Authentication - after connection is established
+    # Don't leave connections hanging - set a timeout for authentication
+    authentication_task = asyncio.create_task(authenticate_websocket(websocket, token, session, conversation_id))
     try:
-        # Authenticate the WebSocket connection
-        user = await get_user_from_token(websocket, session, token)
+        user = await asyncio.wait_for(authentication_task, timeout=10.0)
         if not user:
-            logger.error(f"WebSocket auth failed: Invalid or missing token for conversation {conversation_id}")
-            await websocket.send_json({
-                "type": "error", 
-                "data": {"message": "Authentication failed - invalid or missing token"}
-            })
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            # Authentication failed
+            await websocket.send_json({"type": "error", "message": "Authentication failed"})
+            await websocket.close(code=1008, reason="Authentication failed")
             return
         
-        logger.info(f"WS: User {user.id} authenticated successfully, checking conversation access")
-        
-        # Check if conversation exists and user has access
-        conversation = crud.conversations.get_conversation(
-            session=session, conversation_id=conversation_id
-        )
-        
-        # Log detailed information about the access issue
-        if not conversation:
-            logger.error(f"WebSocket connection rejected: Conversation {conversation_id} not found")
-            await websocket.send_json({
-                "type": "error", 
-                "data": {"message": "Conversation not found"}
-            })
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        # Check if conversation exists
+        conversation = crud.get_conversation(session=session, conversation_id=conversation_id)
+        if not conversation or conversation.user_id != user.id:
+            await websocket.send_json({"type": "error", "message": "Conversation not found or access denied"})
+            await websocket.close(code=1008, reason="Access denied")
             return
+            
+        # Authentication and access check succeeded
+        logger.info(f"WebSocket connection authenticated for user {user.id} in conversation {conversation_id}")
         
-        # Convert UUIDs to strings for comparison
-        user_id_str = str(user.id)
-        conversation_user_id_str = str(conversation.user_id)
+        # Register this connection in the manager
+        manager.connect(websocket, conversation_id, user.id)
         
-        logger.info(f"WS access check: User ID={user_id_str}, Conversation owner ID={conversation_user_id_str}")
-        
-        # Perform the ownership check
-        if user_id_str != conversation_user_id_str:
-            logger.error(f"WebSocket permission denied: User {user_id_str} attempted to access conversation {conversation_id} owned by {conversation_user_id_str}")
-            await websocket.send_json({
-                "type": "error", 
-                "data": {"message": "You don't have permission to access this conversation"}
-            })
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-            return
-        
-        logger.info(f"WS: Access granted to user {user_id_str} for conversation {conversation_id}")
-        
-        # Add connection to manager
-        await manager.connect(websocket, conversation_id, user.id)
-        logger.info(f"WebSocket connection established for user {user.id} on conversation {conversation_id}")
-        
-        # Send initial connection confirmation
+        # Send welcome message to indicate successful connection
         await websocket.send_json({
-            "type": "connected",
-            "data": {
-                "message": "WebSocket connection established",
-                "conversation_id": str(conversation_id),
-                "user_id": user_id_str
-            }
+            "type": "system_message",
+            "content": "Connection established",
+            "timestamp": datetime.utcnow().isoformat()
         })
         
         try:
+            # Main message processing loop
             while True:
-                # Wait for messages from the client
-                data = await websocket.receive_json()
-                logger.info(f"WS: Received message from user {user.id}: {data.get('type', 'unknown')}")
-                
-                # Handle different message types
-                message_type = data.get("type", "text")
-                
-                if message_type == "text":
-                    # Handle text messages (chat)
-                    await handle_text_message(session, websocket, conversation, user, data, conversation_id)
-                elif message_type == "voice_call_request":
-                    # Handle voice call initiation
-                    await handle_voice_call_request(session, websocket, conversation, user, data, conversation_id)
-                elif message_type == "voice_call_end":
-                    # Handle voice call termination
-                    await handle_voice_call_end(session, websocket, conversation, user, data, conversation_id)
-                elif message_type == "ping":
-                    # Simple ping to keep connection alive
-                    await websocket.send_json({"type": "pong", "timestamp": datetime.now().isoformat()})
-                else:
-                    # Unknown message type
-                    logger.warning(f"WS: Unknown message type: {message_type}")
-                    await websocket.send_json({
-                        "type": "error",
-                        "data": {"message": f"Unknown message type: {message_type}"}
-                    })
-        
-        except WebSocketDisconnect:
-            logger.info(f"WebSocket disconnected: User {user.id}, conversation {conversation_id}")
-            manager.disconnect(conversation_id, user.id)
-        except json.JSONDecodeError:
-            logger.error(f"WebSocket error: Invalid JSON received from user {user.id}")
-            await websocket.send_json({"type": "error", "data": {"message": "Invalid message format"}})
-            manager.disconnect(conversation_id, user.id)
+                try:
+                    # Use a timeout to prevent indefinite blocking
+                    data_str = await asyncio.wait_for(websocket.receive_text(), timeout=120)
+                    data = json.loads(data_str)
+                    
+                    # Handle ping messages to keep connection alive
+                    if data.get("type") == "ping":
+                        await websocket.send_json({"type": "pong", "timestamp": datetime.utcnow().isoformat()})
+                        continue
+                        
+                    # Process different message types
+                    if data.get("type") == "text":
+                        await handle_text_message(session, websocket, conversation, user, data, conversation_id)
+                    elif data.get("type") == "voice_call_request":
+                        await handle_voice_call_request(session, websocket, conversation, user, data, conversation_id)
+                    elif data.get("type") == "voice_call_end":
+                        await handle_voice_call_end(session, websocket, conversation, user, data, conversation_id)
+                    else:
+                        await websocket.send_json({"type": "error", "message": f"Unknown message type: {data.get('type')}"})
+                        
+                except asyncio.TimeoutError:
+                    # Send a ping to keep the connection alive during inactivity
+                    await websocket.send_json({"type": "ping", "timestamp": datetime.utcnow().isoformat()})
+                    continue
+                    
+                except json.JSONDecodeError:
+                    await websocket.send_json({"type": "error", "message": "Invalid JSON"})
+                    continue
+                    
+        except WebSocketDisconnect as e:
+            logger.info(f"WebSocket disconnected for user {user.id} in conversation {conversation_id}: {e.code}")
         except Exception as e:
-            logger.error(f"WebSocket error: {e}", exc_info=True)
+            logger.exception(f"Error in WebSocket connection: {str(e)}")
             try:
-                await websocket.send_json({"type": "error", "data": {"message": "Server error occurred"}})
+                await websocket.send_json({"type": "error", "message": "Server error occurred"})
             except:
                 pass
+        finally:
+            # Always clean up the connection
             manager.disconnect(conversation_id, user.id)
+            logger.info(f"WebSocket connection closed for user {user.id} in conversation {conversation_id}")
+            
+    except asyncio.TimeoutError:
+        # Authentication took too long
+        await websocket.send_json({"type": "error", "message": "Authentication timeout"})
+        await websocket.close(code=1008, reason="Authentication timeout")
     except Exception as e:
-        logger.error(f"WebSocket global error: {e}", exc_info=True)
+        logger.exception(f"Error during WebSocket authentication: {str(e)}")
         try:
-            await websocket.close(code=1011)
+            await websocket.send_json({"type": "error", "message": "Server error occurred"})
+            await websocket.close(code=1011, reason="Server error")
         except:
             pass
+
+async def authenticate_websocket(websocket: WebSocket, token: str, session: Session, conversation_id: uuid.UUID):
+    """Authenticate a WebSocket connection using the provided token"""
+    if not token:
+        logger.warning(f"No token provided for WebSocket connection to conversation {conversation_id}")
+        return None
+        
+    try:
+        user = get_user_from_token(websocket, session, token)
+        if not user:
+            logger.warning(f"Invalid token for WebSocket connection to conversation {conversation_id}")
+            return None
+            
+        return user
+    except Exception as e:
+        logger.exception(f"Error authenticating WebSocket connection: {str(e)}")
+        return None
 
 # Handler for text messages
 async def handle_text_message(
@@ -769,3 +762,197 @@ def delete_conversation_route(
 
     crud.conversations.delete_conversation(session=session, db_conversation=conversation)
     return None # No content response 
+
+@router.post("/{conversation_id}/messages/poll", response_model=MessagePublic)
+def poll_for_message(
+    *, 
+    session: SessionDep, 
+    current_user: CurrentUser, 
+    conversation_id: uuid.UUID, 
+    message_in: MessageCreate,
+    last_message_id: uuid.UUID = None
+) -> Any:
+    """
+    Send a message and wait for AI response without using WebSockets.
+    
+    This is a polling-based alternative to WebSockets that:
+    1. Sends the user's message
+    2. Immediately generates and returns the AI's response
+    
+    If last_message_id is provided, it ensures no duplicate messages are processed.
+    """
+    # Check if conversation exists and belongs to user
+    conversation = crud.conversations.get_conversation(session=session, conversation_id=conversation_id)
+    if not conversation:
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found"
+        )
+    if conversation.user_id != current_user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="You don't have permission to access this conversation"
+        )
+    
+    # Get the character
+    character = crud.characters.get_character(session=session, character_id=conversation.character_id)
+    if not character:
+        raise HTTPException(
+            status_code=404,
+            detail="Character not found"
+        )
+    
+    # If last_message_id is provided, check if the message is already processed
+    if last_message_id:
+        # Get the last message in the conversation
+        latest_messages = crud.conversations.get_messages(
+            session=session, 
+            conversation_id=conversation_id,
+            skip=0,
+            limit=1
+        )
+        if latest_messages and str(latest_messages[0].id) == str(last_message_id):
+            # We've already processed this message, just return the AI's last response
+            ai_messages = crud.conversations.get_messages(
+                session=session,
+                conversation_id=conversation_id,
+                skip=0,
+                limit=2,
+                sender="character"
+            )
+            if ai_messages:
+                return ai_messages[0]
+    
+    # Save user's message
+    user_message = Message(
+        content=message_in.content,
+        conversation_id=conversation_id,
+        sender="user"
+    )
+    session.add(user_message)
+    session.commit()
+    session.refresh(user_message)
+    
+    # Generate AI response - use the same logic as the existing send_message endpoint
+    try:
+        # Use the existing logic from the regular message endpoint
+        # This ensures we're using the correct AI service and logic
+        message_handler = MessageHandler()
+        ai_message = message_handler.generate_ai_response(
+            session=session,
+            character=character,
+            conversation=conversation,
+            user_message=user_message,
+            user=current_user
+        )
+        
+        return ai_message
+    except Exception as e:
+        logger.exception(f"Error generating AI response: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to generate AI response"
+        )
+
+@router.get("/{conversation_id}/messages/latest", response_model=MessagesPublic)
+def get_latest_messages(
+    session: SessionDep,
+    current_user: CurrentUser,
+    conversation_id: uuid.UUID,
+    since_timestamp: str = None,
+    limit: int = 10
+) -> Any:
+    """
+    Get the latest messages in a conversation, optionally starting from a specific timestamp.
+    
+    This allows polling for new messages without using WebSockets.
+    """
+    # Check if conversation exists and belongs to user
+    conversation = crud.conversations.get_conversation(session=session, conversation_id=conversation_id)
+    if not conversation:
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found"
+        )
+    if conversation.user_id != current_user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="You don't have permission to access this conversation"
+        )
+    
+    # Get messages, filtered by timestamp if provided
+    if since_timestamp:
+        try:
+            # Parse ISO timestamp
+            since_time = datetime.fromisoformat(since_timestamp.replace('Z', '+00:00'))
+            
+            # Get messages newer than the specified timestamp
+            messages = session.query(Message).filter(
+                Message.conversation_id == conversation_id,
+                Message.timestamp > since_time
+            ).order_by(Message.timestamp.desc()).limit(limit).all()
+            
+            # Reverse to get chronological order
+            messages = list(reversed(messages))
+            
+            return {"data": messages, "count": len(messages)}
+        except ValueError:
+            raise HTTPException(
+                status_code=422, 
+                detail="Invalid timestamp format. Use ISO format (e.g., 2023-01-01T12:00:00Z)"
+            )
+    else:
+        # Get the latest messages
+        messages = crud.conversations.get_messages(
+            session=session,
+            conversation_id=conversation_id,
+            skip=0,
+            limit=limit
+        )
+        
+        return {"data": messages, "count": len(messages)}
+
+# Define a message handler class to simplify message generation
+class MessageHandler:
+    def generate_ai_response(self, session, character, conversation, user_message, user):
+        """Generate an AI response to a user message"""
+        # Get conversation history
+        conversation_history = crud.conversations.get_messages(
+            session=session,
+            conversation_id=conversation.id,
+            skip=0,
+            limit=20
+        )
+        
+        # Get the appropriate AI provider
+        ai_provider = get_ai_provider()
+        
+        # Generate response
+        ai_content = ai_provider.generate_response(
+            character=character,
+            user_message=user_message.content,
+            conversation_history=conversation_history
+        )
+        
+        # Create and save AI message
+        ai_message = Message(
+            content=ai_content,
+            conversation_id=conversation.id,
+            sender="character"
+        )
+        session.add(ai_message)
+        
+        # Update last interaction timestamp
+        conversation.last_interaction_at = datetime.utcnow()
+        session.add(conversation)
+        session.commit()
+        session.refresh(ai_message)
+        
+        return ai_message
+
+# Helper function to get the AI provider
+def get_ai_provider():
+    """Get the configured AI provider service"""
+    # This is simplified - in reality, use dependency injection or service locator
+    from app.services.ai import get_active_ai_provider
+    return get_active_ai_provider() 
