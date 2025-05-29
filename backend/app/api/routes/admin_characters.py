@@ -9,7 +9,7 @@ from sqlmodel import Session, select, func
 from app.api.deps import SessionDep, CurrentUser, get_current_active_superuser
 from app import crud
 from app.models import (
-    Character, CharacterUpdate, CharacterPublic, CharactersPublic, CharacterStatus, Message
+    Character, CharacterUpdate, CharacterPublic, CharactersPublic, CharacterStatus, Message, CharacterAdmin
 )
 
 router = APIRouter(prefix="/admin/characters", tags=["admin-characters"],
@@ -81,7 +81,20 @@ def reject_character(session: SessionDep, id: uuid.UUID) -> Any:
     return character
 
 
-@router.put("/{id}", response_model=CharacterPublic)
+@router.get("/{id}", response_model=CharacterAdmin)
+def get_character_admin(session: SessionDep, id: uuid.UUID) -> Any:
+    """
+    Get a specific character by ID (admin view).
+    Returns character regardless of status and includes all fields.
+    """
+    db_character = crud.characters.get_character(session=session, character_id=id)
+    if not db_character:
+        raise HTTPException(status_code=404, detail="Character not found")
+    
+    return db_character
+
+
+@router.put("/{id}", response_model=CharacterAdmin)
 def update_character_admin(
     *, session: SessionDep, id: uuid.UUID, character_in: CharacterUpdate
 ) -> Any:

@@ -219,6 +219,7 @@ class CharacterUpdate(SQLModel):
     is_public: bool | None = None
     is_featured: bool | None = None
     admin_feedback: str | None = None
+    fallback_response: str | None = None
 
 
 # Database model
@@ -248,6 +249,16 @@ class CharacterPublic(CharacterBase):
     # Omitting admin_feedback for now
     admin_feedback: str | None = Field(default=None, exclude=True)
     fallback_response: str | None = Field(default=None, exclude=True) # Exclude fallback from public view
+
+
+# Properties to return via admin API (includes all fields)
+class CharacterAdmin(CharacterBase):
+    id: uuid.UUID
+    creator_id: uuid.UUID
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
+    # Include admin fields that are excluded from public view
+    # admin_feedback and fallback_response are already in CharacterBase
 
 
 class CharactersPublic(SQLModel):

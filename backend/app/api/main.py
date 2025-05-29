@@ -11,6 +11,7 @@ api_router.include_router(items.router)
 api_router.include_router(characters.router)
 api_router.include_router(admin_characters.router)
 api_router.include_router(conversations.router)
+api_router.include_router(config.router)
 # api_router.include_router(admin.router) # Commented out as this module doesn't exist
 api_router.include_router(ws_debug.router)
 

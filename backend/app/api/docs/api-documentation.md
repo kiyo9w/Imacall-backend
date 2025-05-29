@@ -490,6 +490,48 @@ This document describes the API endpoints for the Imacall application, based on 
     *   `404 Not Found`: Character not found.
     *   `422 Unprocessable Entity`: Invalid UUID format or validation error in body.
 
+### Get Character (Admin)
+
+*   **Endpoint:** `GET /admin/characters/{id}`
+*   **Description:** Get detailed information about a specific character by ID, including admin-only fields like `admin_feedback` and `fallback_response`. Returns character regardless of status.
+*   **Authentication:** Requires `Authorization: Bearer <token>` (Superuser).
+*   **Parameters:**
+    *   `id`: `string` (Path parameter, UUID format) *Required*
+*   **Responses:**
+    *   `200 OK`: Character details with all fields (`CharacterAdmin` schema).
+        ```json
+        {
+          "id": "uuid",
+          "name": "Character Name",
+          "description": "...",
+          "image_url": "...",
+          "greeting_message": "...",
+          "scenario": "...",
+          "category": "...",
+          "language": "...",
+          "tags": ["tag1", "tag2"],
+          "voice_id": "...",
+          "personality_traits": "...",
+          "writing_style": "...",
+          "background": "...",
+          "knowledge_scope": "...",
+          "quirks": "...",
+          "emotional_range": "...",
+          "popularity_score": 100,
+          "status": "pending|approved|rejected",
+          "is_public": true,
+          "is_featured": false,
+          "creator_id": "uuid",
+          "created_at": "2025-01-01T12:00:00Z",
+          "updated_at": "2025-01-01T12:00:00Z",
+          "admin_feedback": "Optional admin feedback",
+          "fallback_response": "Fallback message for AI failures"
+        }
+        ```
+    *   `401 Unauthorized`/`403 Forbidden`: Not authenticated or insufficient permissions.
+    *   `404 Not Found`: Character not found.
+    *   `422 Unprocessable Entity`: Invalid UUID format.
+
 ### Update Character (Admin)
 
 *   **Endpoint:** `PUT /admin/characters/{id}`
@@ -848,6 +890,36 @@ The system supports multiple AI providers for character responses:
       "created_at": "datetime",
       "updated_at": "datetime"
       // admin_feedback & fallback_response excluded from public view
+    }
+    ```
+*   **CharacterAdmin:** 
+    ```json
+    { 
+      "id": "uuid", 
+      "name": "string (max 100)",
+      "description": "string?", 
+      "image_url": "string?", 
+      "greeting_message": "string?",
+      "scenario": "string?",
+      "category": "string?", 
+      "language": "string?",
+      "tags": ["string"] | "string"?,
+      "voice_id": "string?",
+      "personality_traits": "string?",
+      "writing_style": "string?", 
+      "background": "string?",
+      "knowledge_scope": "string?",
+      "quirks": "string?",
+      "emotional_range": "string?",
+      "popularity_score": "integer",
+      "status": "pending|approved|rejected",
+      "is_public": "boolean",
+      "is_featured": "boolean", 
+      "creator_id": "uuid",
+      "created_at": "datetime",
+      "updated_at": "datetime",
+      "admin_feedback": "string?",     // Admin-only field
+      "fallback_response": "string?"   // Admin-only field
     }
     ```
 *   **CharacterCreate:** 
