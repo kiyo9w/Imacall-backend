@@ -8,6 +8,7 @@ import json # Import json for safer parsing if possible
 
 from pydantic import EmailStr, field_validator
 from sqlmodel import Field, Relationship, SQLModel, Column, Text
+from sqlalchemy import Column, String, UniqueConstraint
 
 
 # Shared properties
@@ -159,6 +160,7 @@ class CharacterBase(SQLModel):
     is_public: bool = Field(default=True) # Whether it appears in public lists after approval
     is_featured: bool = Field(default=False)
     admin_feedback: str | None = Field(default=None, sa_column=Column(Text)) # Feedback on rejection/changes
+    fallback_response: str | None = Field(default=None, sa_column=Column(Text)) # Fallback response for AI errors
 
     @field_validator("tags", mode="before")
     @classmethod
@@ -245,6 +247,7 @@ class CharacterPublic(CharacterBase):
     # We might refine this later based on UX/privacy needs
     # Omitting admin_feedback for now
     admin_feedback: str | None = Field(default=None, exclude=True)
+    fallback_response: str | None = Field(default=None, exclude=True) # Exclude fallback from public view
 
 
 class CharactersPublic(SQLModel):
@@ -331,3 +334,21 @@ class MessagePublic(MessageBase):
 class MessagesPublic(SQLModel):
     data: list[MessagePublic]
     count: int
+
+
+# ---------------- AI Provider Configuration Model ----------------
+
+class AIProviderConfigBase(SQLModel):
+    active_provider_name: str = Field(sa_column=Column(String, default="gemini", index=True))
+
+class AIProviderConfig(AIProviderConfigBase, table=True):
+    __tablename__ = "ai_provider_config" # Explicit table name
+    id: int | None = Field(default=1, primary_key=True) # Keep it simple with a single row
+
+    # Ensure only one row can exist with id=1
+    __table_args__ = (UniqueConstraint('id'),)
+
+
+# Public schema for AIProviderConfig (if needed, but likely not directly exposed)
+class AIProviderConfigPublic(AIProviderConfigBase):
+    pass

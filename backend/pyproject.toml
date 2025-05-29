@@ -22,7 +22,9 @@ dependencies = [
     "pydantic-settings<3.0.0,>=2.2.1",
     "sentry-sdk[fastapi]<2.0.0,>=1.40.6",
     "pyjwt<3.0.0,>=2.8.0",
-    "google-generativeai>=0.8.5",
+    "google-genai",
+    "openai<2.0.0,>=1.2.3",
+    "anthropic<1.0.0,>=0.20.0",
 ]
 
 [tool.uv]

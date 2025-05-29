@@ -125,6 +125,9 @@ class Settings(BaseSettings):
     FPT_AI_API_KEY: str | None = None
     OPENROUTER_API_KEY: str | None = None
 
+    # Default model for OpenRouter, can be overridden by Character.model_name
+    OPENROUTER_DEFAULT_MODEL: str | None = None
+
     def _check_default_secret(self, var_name: str, value: str | None) -> None:
         if value == "changethis":
             message = (

@@ -326,8 +326,10 @@ async def handle_text_message(
         try:
             # Process AI response in background to not block the WebSocket
             logger.info(f"WS: Getting AI response from service for user {user.id}")
+            # Pass the database session to the AI service
             ai_response_content = await asyncio.to_thread(
                 ai_service.get_ai_response,
+                session=session,
                 character=character,
                 history=history
             )
@@ -722,7 +724,8 @@ def send_message(
         character = char # Assign loaded character
 
     try:
-        ai_response_content = ai_service.get_ai_response(character=character, history=history)
+        # Pass the database session to the AI service
+        ai_response_content = ai_service.get_ai_response(session=session, character=character, history=history)
     except Exception as e:
         logger.error(f"AI service failed for conv {conversation_id}: {e}", exc_info=True)
         # Handle AI failure gracefully, maybe return the user message ID and an error indicator?
@@ -830,8 +833,8 @@ def poll_for_message(
 
     # 4. Call the AI service to get a response
     try:
-        # Use the same AI service as the regular endpoint
-        ai_response_content = ai_service.get_ai_response(character=character, history=history)
+        # Pass the database session to the AI service
+        ai_response_content = ai_service.get_ai_response(session=session, character=character, history=history)
         
         # 5. Save the AI's response
         ai_message = crud.conversations.create_message(

@@ -4,12 +4,24 @@ import logging
 import uuid
 import json
 import requests
-from typing import Sequence, Protocol, runtime_checkable, Any, Dict, Type, List, Tuple
-import google.generativeai as genai
-from google.generativeai.types import HarmCategory, HarmBlockThreshold
+from typing import Sequence, Protocol, runtime_checkable, Any, Dict, Type, List, Tuple, Optional
+# Update Gemini import to new format
+try:
+    from google import genai
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+    genai = None
+import importlib
+import traceback
 
-from app.models import Character, Message, MessageSender
+from app.models import Character, Message, MessageSender, AIProviderConfig
 from app.core.config import settings
+from sqlmodel import Session
+from openai import OpenAI, APITimeoutError, APIConnectionError, RateLimitError, APIStatusError
+from anthropic import Anthropic, HUMAN_PROMPT, AI_PROMPT
+import httpx
+from app.crud.config import get_ai_provider_config, set_ai_provider_config as crud_set_ai_provider_config
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +30,7 @@ logger = logging.getLogger(__name__)
 @runtime_checkable
 class AIProvider(Protocol):
     """Interface for AI model providers."""
-    def __init__(self, api_key: str | None):
+    def __init__(self, api_key: str | None, api_base: str | None = None):
         ...
 
     def get_response(
@@ -27,45 +39,18 @@ class AIProvider(Protocol):
         """Generates a response based on character and history."""
         ...
 
-
-# --- Provider Implementations ---
-
-class GeminiProvider(AIProvider):
-    """Google Gemini provider (using gemini-1.5-flash-latest)."""
-    def __init__(self, api_key: str | None):
-        if not api_key:
-            raise ValueError("GEMINI_API_KEY is not configured.")
-        genai.configure(api_key=api_key)
-        # Using flash model for speed and cost
-        self.model_name = 'gemini-1.5-flash-latest'
-        self.safety_settings = {
-            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-        }
-
     def _build_system_prompt(self, character: Character) -> str:
         prompt_parts = [
-            f"You are {character.name}. You must always respond in character.",
-            f"Character Description: {character.description}" if character.description else "",
-            f"Current Scenario: {character.scenario}" if character.scenario else "",
-            f"Personality Traits: {character.personality_traits}" if character.personality_traits else "",
-            f"Writing Style: {character.writing_style}" if character.writing_style else "",
-            f"Background/History: {character.background}" if character.background else "",
-            f"Knowledge Scope: {character.knowledge_scope}" if character.knowledge_scope else "",
-            f"Character Quirks: {character.quirks}" if character.quirks else "",
-            f"Emotional Range: {character.emotional_range}" if character.emotional_range else "",
-            f"Language: Always respond in {character.language}." if character.language else "Language: Respond in English.",
-            "",
-            "IMPORTANT GUIDELINES:",
-            "- Stay completely in character at all times",
-            "- Use the personality traits and writing style consistently", 
-            "- Reference your background and knowledge scope when relevant",
-            "- Express emotions according to your defined emotional range",
-            "- Display your unique quirks naturally in conversation",
-            "- Keep responses engaging but concise unless asked for more detail",
-            "- Never break character or mention that you are an AI"
+            f"You are {character.name}, a character with the following traits:",
+            f"- Personality: {character.personality_traits}",
+            f"- Writing Style: {character.writing_style}",
+            f"- Background: {character.background}",
+            f"- Knowledge Scope: {character.knowledge_scope}",
+            f"- Quirks: {character.quirks}",
+            f"- Emotional Range: {character.emotional_range}",
+            f"- Scenario: {character.scenario}",
+            f"- Language: {character.language}",
+            "Please embody this character fully in your responses. Be engaging and stay in character."
         ]
         return "\n".join(filter(None, prompt_parts))
 
@@ -73,29 +58,39 @@ class GeminiProvider(AIProvider):
         """Format message history for Gemini API."""
         formatted_history = []
         for msg in history:
-            role = "model" if msg.sender == MessageSender.AI else "user"
+            role = "user" if msg.sender == MessageSender.USER else "model"
             formatted_history.append({"role": role, "parts": [msg.content]})
         return formatted_history
 
-    def _truncate_history_if_needed(self, history: Sequence[Message], max_messages: int = 50) -> Sequence[Message]:
+    def _truncate_history_if_needed(self, history: Sequence[Message], max_tokens: int = 30000) -> Sequence[Message]:
         """Truncate history to prevent token overflow while preserving recent context."""
-        if len(history) <= max_messages:
-            return history
+        current_tokens = sum(len(msg.content) for msg in history) // 4
+        if current_tokens > max_tokens:
+            logger.warning(f"History ({current_tokens} tokens) exceeds max_tokens ({max_tokens}). Truncating.")
+            num_to_keep = int(len(history) * 0.75)
+            return history[-num_to_keep:]
+        return history
+
+# --- Provider Implementations ---
+
+class GeminiProvider(AIProvider):
+    """Google Gemini provider using the new API format."""
+    def __init__(self, api_key: str | None, api_base: str | None = None):
+        # AIProvider is a Protocol, so no super().__init__ needed
+        # Assign api_key from parameter or fallback to settings
+        self.api_key = api_key if api_key else settings.GEMINI_API_KEY
+        self.api_base = api_base  # Not used for Gemini but kept for consistency
         
-        # Keep the most recent messages, but ensure we have both user and AI messages for context
-        recent_history = list(history[-max_messages:])
+        if not GEMINI_AVAILABLE:
+            raise ValueError("Google Gemini library is not available. Please install: pip install google-genai")
         
-        # If the first message in our truncated history is from AI, 
-        # try to include the preceding user message for context
-        if recent_history and recent_history[0].sender == MessageSender.AI:
-            # Find the preceding user message
-            for i in range(len(history) - max_messages - 1, -1, -1):
-                if history[i].sender == MessageSender.USER:
-                    recent_history.insert(0, history[i])
-                    break
-        
-        logger.info(f"Truncated conversation history from {len(history)} to {len(recent_history)} messages")
-        return recent_history
+        if not self.api_key:
+            raise ValueError("GEMINI_API_KEY is not configured.")
+            
+        # Create Gemini client using new API format
+        self.client = genai.Client(api_key=self.api_key)
+        # Use new model
+        self.model_name = 'gemini-2.0-flash'
 
     def get_response(
         self, *, character: Character, history: Sequence[Message]
@@ -104,87 +99,289 @@ class GeminiProvider(AIProvider):
         
         # Truncate history if too long
         truncated_history = self._truncate_history_if_needed(history)
-        formatted_history = self._format_history(truncated_history)
 
-        logger.debug(f"--- Gemini Request for {character.name} ---")
-        logger.debug(f"System Prompt: {system_prompt}")
-        logger.debug(f"History length: {len(formatted_history)} messages")
+        logger.info(f"--- Gemini Request for {character.name} ---")
+        logger.info(f"System Prompt length: {len(system_prompt)} chars")
+        logger.info(f"History length: {len(truncated_history)} messages")
 
         try:
-            # Create model with system instruction
-            model = genai.GenerativeModel(
-                model_name=self.model_name,
-                system_instruction=system_prompt
-            )
-
-            # Get the latest user message
-            last_user_message = None
-            for msg in reversed(truncated_history):
-                if msg.sender == MessageSender.USER:
-                    last_user_message = msg.content
-                    break
-
-            if not last_user_message:
-                # If no user message found (shouldn't happen in normal flow), return greeting
-                return character.greeting_message or f"Hello! I'm {character.name}. How can I help you?"
-
-            # Start chat with history (excluding the last user message since we'll send it separately)
-            chat_history = formatted_history[:-1] if formatted_history and formatted_history[-1]["role"] == "user" else formatted_history
+            # Build conversation contents
+            conversation_parts = [system_prompt]
             
-            chat = model.start_chat(history=chat_history)
-
-            # Send the latest user message
-            response = chat.send_message(
-                last_user_message,
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.9,  # High creativity for character roleplay
-                    top_p=0.95,       # Slightly focused but still creative
-                    top_k=40,         # Moderate diversity
-                    max_output_tokens=2048,  # Reasonable response length
-                ),
-                safety_settings=self.safety_settings,
+            # Add history
+            for msg in truncated_history:
+                role_prefix = "User:" if msg.sender == MessageSender.USER else "Assistant:"
+                conversation_parts.append(f"{role_prefix} {msg.content}")
+            
+            # Join all parts into single content string
+            contents = "\n\n".join(conversation_parts)
+            
+            # Generate response using new API format
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=contents
             )
 
-            logger.debug(f"--- Gemini Response for {character.name} ---: {response.text}")
-            return response.text.strip()
+            logger.info(f"--- Gemini Response for {character.name} received successfully ---")
+            
+            # Extract response text
+            response_text = response.text if hasattr(response, 'text') and response.text else None
+            return response_text.strip() if response_text else (character.fallback_response or f"*{character.name} seems momentarily distracted*")
             
         except Exception as e:
             logger.error(f"Error calling Gemini API for character {character.name}: {e}", exc_info=True)
-            # Provide a character-specific fallback response
-            fallback_responses = [
-                f"*{character.name} seems momentarily distracted*",
-                f"*{character.name} pauses thoughtfully*",
-                f"I'm sorry, I need a moment to gather my thoughts...",
-                f"*There seems to be some interference with {character.name}'s response*"
-            ]
-            import random
-            return random.choice(fallback_responses)
+            # Use character fallback response or generic fallback
+            return character.fallback_response or f"*{character.name} seems momentarily distracted*"
 
 
 class OpenAIProvider(AIProvider):
-    """Placeholder for OpenAI provider."""
-    def __init__(self, api_key: str | None):
-        if not api_key:
-            logger.warning("OPENAI_API_KEY is not configured. OpenAIProvider will not work.")
-        # Initialize OpenAI client here (e.g., import openai; openai.api_key = api_key)
+    """Direct OpenAI provider."""
+    def __init__(self, api_key: str | None, api_base: str | None = None, model_name: str = "gpt-4o"):
+        # AIProvider is a Protocol, so no super().__init__ needed
+        # Assign parameters to instance variables
+        self.api_key = api_key
+        self.api_base = api_base or "https://api.openai.com/v1"  # Default to OpenAI API
+        self.model_name = model_name
+
+        # Check if API key is configured
+        if not self.api_key:
+            logger.warning(f"API_KEY for {self.__class__.__name__} (model: {model_name}) is not configured. Provider will not work.")
+            raise ValueError(f"OPENAI_API_KEY (model: {model_name}) is not configured.")
+
+        self.client_params = {"api_key": self.api_key, "base_url": self.api_base}
+        self.client = OpenAI(**self.client_params)
+        self.extra_headers = {}  # No special headers for direct OpenAI
+
+    def _format_history_for_openai(self, history: Sequence[Message]) -> List[Dict[str, Any]]:
+        """Format message history for OpenAI API (roles: user, assistant)."""
+        formatted_history = []
+        for msg in history:
+            role = "assistant" if msg.sender == MessageSender.AI else "user"
+            formatted_history.append({"role": role, "content": msg.content})
+        return formatted_history
 
     def get_response(
         self, *, character: Character, history: Sequence[Message]
     ) -> str:
-        logger.warning("OpenAIProvider.get_response called but not implemented.")
-        raise NotImplementedError("OpenAI provider is not yet implemented.")
-        # Implementation would involve:
-        # 1. Building a system prompt similar to Gemini.
-        # 2. Formatting history (roles: system, user, assistant).
-        # 3. Calling the OpenAI ChatCompletion API.
-        # return f"(OOC: OpenAI provider for {character.name} not implemented)"
+        if not self.api_key:
+            logger.error(f"API key not configured for {self.__class__.__name__} using model {self.model_name}. Cannot make API call.")
+            return f"(OOC: Configuration error - API key missing for {character.name})"
+
+        system_prompt_content = self._build_system_prompt(character)
+        truncated_history = self._truncate_history_if_needed(history, max_tokens=160000)
+        formatted_openai_history = self._format_history_for_openai(truncated_history)
+
+        messages = [
+            {"role": "system", "content": system_prompt_content}
+        ] + formatted_openai_history
+
+        logger.debug(f"--- OpenAI Request for {character.name} (Model: {self.model_name}) ---")
+        logger.debug(f"System Prompt: {system_prompt_content}")
+        logger.debug(f"Formatted History (last 2): {formatted_openai_history[-2:] if len(formatted_openai_history) > 1 else formatted_openai_history}")
+
+        try:
+            completion = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=0.8, 
+                max_tokens=1024,
+                top_p=0.9,
+                extra_headers=self.extra_headers if self.extra_headers else None
+            )
+            response_text = completion.choices[0].message.content
+            logger.debug(f"--- OpenAI Response for {character.name} ---: {response_text[:100]}...")
+            return response_text.strip() if response_text else f"(OOC: {character.name} received an empty response.)"
+        except APITimeoutError as e:
+            logger.error(f"OpenAI API timeout for {character.name} (Model: {self.model_name}): {e}")
+            return f"(OOC: Sorry, my thoughts got lost in hyperspace... timed out!)"
+        except APIConnectionError as e:
+            logger.error(f"OpenAI API connection error for {character.name} (Model: {self.model_name}): {e}")
+            return f"(OOC: Hmm, can't seem to connect to the ethereal plane of ideas right now.)"
+        except RateLimitError as e:
+            logger.error(f"OpenAI API rate limit exceeded for {character.name} (Model: {self.model_name}): {e}")
+            return f"(OOC: Wooah, too many ideas flowing! I need a moment to catch my breath.)"
+        except APIStatusError as e:
+            logger.error(f"OpenAI API status error for {character.name} (Model: {self.model_name}). Status: {e.status_code}, Response: {e.response.text}")
+            return f"(OOC: Uh oh, the universal translator seems to be on the fritz. Status: {e.status_code})"
+        except Exception as e:
+            logger.error(f"Generic error calling OpenAI API for {character.name} (Model: {self.model_name}): {e}", exc_info=True)
+            return f"(OOC: My apologies, a cosmic ray seems to have hit my thinking circuits!)"
+
+
+class BaseOpenRouterProvider(AIProvider):
+    """Base OpenRouter provider that other OpenRouter model providers inherit from."""
+    def __init__(self, api_key: str | None, model_name: str):
+        # AIProvider is a Protocol, so no super().__init__ needed
+        self.api_key = api_key
+        self.api_base = "https://openrouter.ai/api/v1"
+        self.model_name = model_name
+
+        # Check if API key is configured
+        if not self.api_key:
+            logger.warning(f"OPENROUTER_API_KEY for {self.__class__.__name__} (model: {model_name}) is not configured. Provider will not work.")
+            raise ValueError(f"OPENROUTER_API_KEY (model: {model_name}) is not configured.")
+
+        self.client_params = {"api_key": self.api_key, "base_url": self.api_base}
+        self.client = OpenAI(**self.client_params)
+
+        # Prepare OpenRouter specific headers
+        self.extra_headers = {
+            "HTTP-Referer": getattr(settings, "FRONTEND_HOST", "https://imacall.app"),
+            "X-Title": getattr(settings, "PROJECT_NAME", "ImaCall")
+        }
+        logger.info(f"OpenRouter headers configured for {self.__class__.__name__}: Referer='{self.extra_headers['HTTP-Referer']}', X-Title='{self.extra_headers['X-Title']}'")
+
+    def _build_system_prompt(self, character: Character) -> str:
+        """Build system prompt for the character."""
+        prompt_parts = [
+            f"You are {character.name}, a character with the following traits:",
+            f"- Personality: {character.personality_traits}",
+            f"- Writing Style: {character.writing_style}",
+            f"- Background: {character.background}",
+            f"- Knowledge Scope: {character.knowledge_scope}",
+            f"- Quirks: {character.quirks}",
+            f"- Emotional Range: {character.emotional_range}",
+            f"- Scenario: {character.scenario}",
+            f"- Language: {character.language}",
+            "Please embody this character fully in your responses. Be engaging and stay in character."
+        ]
+        return "\n".join(filter(None, prompt_parts))
+
+    def _truncate_history_if_needed(self, history: Sequence[Message], max_tokens: int = 30000) -> Sequence[Message]:
+        """Truncate history to prevent token overflow while preserving recent context."""
+        current_tokens = sum(len(msg.content) for msg in history) // 4
+        if current_tokens > max_tokens:
+            logger.warning(f"History ({current_tokens} tokens) exceeds max_tokens ({max_tokens}). Truncating.")
+            num_to_keep = int(len(history) * 0.75)
+            return history[-num_to_keep:]
+        return history
+
+    def _format_history_for_openai(self, history: Sequence[Message]) -> List[Dict[str, Any]]:
+        """Format message history for OpenAI API (roles: user, assistant)."""
+        formatted_history = []
+        for msg in history:
+            role = "assistant" if msg.sender == MessageSender.AI else "user"
+            formatted_history.append({"role": role, "content": msg.content})
+        return formatted_history
+
+    def get_response(
+        self, *, character: Character, history: Sequence[Message]
+    ) -> str:
+        try:
+            if not self.api_key:
+                logger.error(f"API key not configured for {self.__class__.__name__} using model {self.model_name}. Cannot make API call.")
+                return character.fallback_response or f"(OOC: Configuration error - API key missing for {character.name})"
+
+            system_prompt_content = self._build_system_prompt(character)
+            truncated_history = self._truncate_history_if_needed(history, max_tokens=8000)  # Reduced from 160000
+            formatted_openai_history = self._format_history_for_openai(truncated_history)
+
+            messages = [
+                {"role": "system", "content": system_prompt_content}
+            ] + formatted_openai_history
+
+            logger.info(f"--- OpenRouter Request for {character.name} (Model: {self.model_name}) ---")
+            logger.info(f"System Prompt length: {len(system_prompt_content)} chars")
+            logger.info(f"History messages: {len(formatted_openai_history)}")
+            logger.info(f"Extra Headers for OpenRouter: {self.extra_headers}")
+            
+            # Log the actual request payload (truncated for readability)
+            logger.info(f"Request payload preview:")
+            logger.info(f"- Model: {self.model_name}")
+            logger.info(f"- Messages count: {len(messages)}")
+            logger.info(f"- Last user message: {messages[-1]['content'][:100] if messages else 'None'}...")
+            logger.info(f"- Temperature: 0.8, Max tokens: 1024")
+
+            completion = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=0.8, 
+                max_tokens=1024,
+                top_p=0.9,
+                extra_headers=self.extra_headers
+            )
+            
+            # Debug the response structure
+            logger.info(f"OpenRouter API Response Debug:")
+            logger.info(f"- Completion object type: {type(completion)}")
+            logger.info(f"- Choices length: {len(completion.choices) if completion.choices else 'None'}")
+            if completion.choices and len(completion.choices) > 0:
+                logger.info(f"- First choice: {completion.choices[0]}")
+                logger.info(f"- Message: {completion.choices[0].message}")
+                logger.info(f"- Content: '{completion.choices[0].message.content}'")
+                logger.info(f"- Content type: {type(completion.choices[0].message.content)}")
+            
+            response_text = completion.choices[0].message.content
+            logger.info(f"--- OpenRouter Response for {character.name} received successfully ---")
+            logger.info(f"Response text: '{response_text}' (length: {len(response_text) if response_text else 0})")
+            return response_text.strip() if response_text else (character.fallback_response or f"(OOC: {character.name} received an empty response.)")
+
+        except APITimeoutError as e:
+            logger.error(f"OpenRouter API timeout for {character.name} (Model: {self.model_name}): {e}")
+            return character.fallback_response or f"(OOC: Sorry, my thoughts got lost in hyperspace... timed out!)"
+        except APIConnectionError as e:
+            logger.error(f"OpenRouter API connection error for {character.name} (Model: {self.model_name}): {e}")
+            return character.fallback_response or f"(OOC: Hmm, can't seem to connect to the ethereal plane of ideas right now.)"
+        except RateLimitError as e:
+            logger.error(f"OpenRouter API rate limit exceeded for {character.name} (Model: {self.model_name}): {e}")
+            return character.fallback_response or f"(OOC: Wooah, too many ideas flowing! I need a moment to catch my breath.)"
+        except APIStatusError as e:
+            logger.error(f"OpenRouter API status error for {character.name} (Model: {self.model_name}). Status: {e.status_code}, Response: {e.response.text}")
+            return character.fallback_response or f"(OOC: Uh oh, the universal translator seems to be on the fritz. Status: {e.status_code})"
+        except Exception as e:
+            logger.error(f"CRITICAL: Unexpected error calling OpenRouter API for {character.name} (Model: {self.model_name}): {e}", exc_info=True)
+            return character.fallback_response or f"(OOC: My apologies, a cosmic ray seems to have hit my thinking circuits!)"
+
+
+# Individual OpenRouter Model Providers
+class DeepSeekR1Provider(BaseOpenRouterProvider):
+    """DeepSeek R1 provider using OpenRouter."""
+    def __init__(self, api_key: str | None, api_base: str | None = None):
+        # Call BaseOpenRouterProvider init directly, no super() needed
+        BaseOpenRouterProvider.__init__(self, api_key, "deepseek/deepseek-r1-0528-qwen3-8b:free")
+
+
+class SarvamProvider(BaseOpenRouterProvider):
+    """Sarvam M provider using OpenRouter."""
+    def __init__(self, api_key: str | None, api_base: str | None = None):
+        # Call BaseOpenRouterProvider init directly, no super() needed
+        BaseOpenRouterProvider.__init__(self, api_key, "sarvamai/sarvam-m:free")
+
+
+class DeepSeekChatProvider(BaseOpenRouterProvider):
+    """DeepSeek Chat V3 provider using OpenRouter."""
+    def __init__(self, api_key: str | None, api_base: str | None = None):
+        # Call BaseOpenRouterProvider init directly, no super() needed
+        BaseOpenRouterProvider.__init__(self, api_key, "deepseek/deepseek-chat-v3-0324:free")
+
+
+class Qwen3Provider(BaseOpenRouterProvider):
+    """Qwen 3 235B provider using OpenRouter."""
+    def __init__(self, api_key: str | None, api_base: str | None = None):
+        # Call BaseOpenRouterProvider init directly, no super() needed
+        BaseOpenRouterProvider.__init__(self, api_key, "qwen/qwen3-235b-a22b:free")
+
+
+class Gemma3Provider(BaseOpenRouterProvider):
+    """Gemma 3 27B provider using OpenRouter."""
+    def __init__(self, api_key: str | None, api_base: str | None = None):
+        # Call BaseOpenRouterProvider init directly, no super() needed  
+        BaseOpenRouterProvider.__init__(self, api_key, "google/gemma-3-27b-it:free")
+
 
 class ClaudeProvider(AIProvider):
     """Placeholder for Anthropic Claude provider."""
-    def __init__(self, api_key: str | None):
-        if not api_key:
+    def __init__(self, api_key: str | None, api_base: str | None = None, model_name: str = "claude-3-haiku-20240307"):
+        # AIProvider is a Protocol, so no super().__init__ needed
+        # Assign parameters to instance variables
+        self.api_key = api_key
+        self.api_base = api_base  # Not used for Claude but kept for consistency
+        self.model_name = model_name
+        
+        if not self.api_key:
              logger.warning("CLAUDE_API_KEY is not configured. ClaudeProvider will not work.")
         # Initialize Claude client here
+        self.client = Anthropic(api_key=self.api_key)
 
     def get_response(
         self, *, character: Character, history: Sequence[Message]
@@ -197,13 +394,17 @@ class ClaudeProvider(AIProvider):
         # 3. Calling the Anthropic Messages API.
         # return f"(OOC: Claude provider for {character.name} not implemented)"
 
-class OpenRouterProvider(AIProvider):
-    """OpenRouter provider for accessing various LLMs (using Qwen3 30B A3B by default)."""
-    def __init__(self, api_key: str | None):
-        if not api_key:
-            raise ValueError("OPENROUTER_API_KEY is not configured.")
+class OldOpenRouterProvider(AIProvider):
+    """DEPRECATED: Old OpenRouter provider using direct requests. Use OpenAIProvider with OpenRouter base URL instead."""
+    def __init__(self, api_key: str | None, api_base: str | None = None):
+        # AIProvider is a Protocol, so no super().__init__ needed
+        # Assign parameters to instance variables
         self.api_key = api_key
-        # OpenRouter API endpoint for chat completions
+        self.api_base = api_base  # Not used but kept for consistency
+        
+        if not self.api_key:
+            raise ValueError("OPENROUTER_API_KEY is not configured.")
+            
         self.api_url = "https://openrouter.ai/api/v1/chat/completions"
         # Default to Qwen3 30B A3B (free)
         self.model = "qwen/qwen3-30b-a3b:free"
@@ -213,23 +414,6 @@ class OpenRouterProvider(AIProvider):
             "HTTP-Referer": "https://imacall.app",  # Replace with your actual site URL
             "X-Title": "ImaCall",  # Replace with your site name
         }
-
-    def _build_system_prompt(self, character: Character) -> str:
-        prompt_parts = [
-            f"You are {character.name}. Respond as this character.",
-            f"Description: {character.description}" if character.description else "",
-            f"Scenario: {character.scenario}" if character.scenario else "",
-            f"Personality Traits: {character.personality_traits}" if character.personality_traits else "",
-            f"Writing Style: {character.writing_style}" if character.writing_style else "",
-            f"Background: {character.background}" if character.background else "",
-            f"Knowledge Scope: {character.knowledge_scope}" if character.knowledge_scope else "",
-            f"Quirks: {character.quirks}" if character.quirks else "",
-            f"Emotional Range: {character.emotional_range}" if character.emotional_range else "",
-            f"Language: Respond in {character.language}." if character.language else "Respond in English.",
-            "Maintain character consistency throughout the conversation.",
-            "Keep responses concise and engaging unless the user prompts for more detail.",
-        ]
-        return "\n".join(filter(None, prompt_parts)) # Filter out empty strings
 
     def _format_history(self, history: Sequence[Message]) -> List[Dict[str, Any]]:
         # Format messages for the OpenRouter API (OpenAI-compatible format)
@@ -295,34 +479,21 @@ class OpenRouterProvider(AIProvider):
 
 class FPTAIProvider(AIProvider):
     """FPT AI Marketplace provider (using Llama-3.3-70B-Instruct)."""
-    def __init__(self, api_key: str | None):
-        if not api_key:
-            raise ValueError("FPT_AI_API_KEY is not configured.")
+    def __init__(self, api_key: str | None, api_base: str | None = None):
+        # AIProvider is a Protocol, so no super().__init__ needed
+        # Assign parameters to instance variables
         self.api_key = api_key
-        # URL for FPT AI Marketplace API
+        self.api_base = api_base
+        
+        if not self.api_key:
+            raise ValueError("FPT_AI_API_KEY is not configured.")
+            
         self.api_url = "https://api.fpt.ai/llm/v1/completion"
         self.model = "Llama-3.3-70B-Instruct"
         self.headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}"
+            "api_key": self.api_key  # FPT AI uses api_key in headers, not Bearer token
         }
-
-    def _build_system_prompt(self, character: Character) -> str:
-        prompt_parts = [
-            f"You are {character.name}. Respond as this character.",
-            f"Description: {character.description}" if character.description else "",
-            f"Scenario: {character.scenario}" if character.scenario else "",
-            f"Personality Traits: {character.personality_traits}" if character.personality_traits else "",
-            f"Writing Style: {character.writing_style}" if character.writing_style else "",
-            f"Background: {character.background}" if character.background else "",
-            f"Knowledge Scope: {character.knowledge_scope}" if character.knowledge_scope else "",
-            f"Quirks: {character.quirks}" if character.quirks else "",
-            f"Emotional Range: {character.emotional_range}" if character.emotional_range else "",
-            f"Language: Respond in {character.language}." if character.language else "Respond in English.",
-            "Maintain character consistency throughout the conversation.",
-            "Keep responses concise and engaging unless the user prompts for more detail.",
-        ]
-        return "\n".join(filter(None, prompt_parts)) # Filter out empty strings
 
     def _format_history(self, history: Sequence[Message]) -> List[Dict[str, Any]]:
         # Format messages for the chat completion API
@@ -389,106 +560,147 @@ class FPTAIProvider(AIProvider):
             return f"(OOC: Sorry, I encountered an error trying to respond as {character.name}.)"
 
 
-# --- Service Management ---
+# --- Provider Management ---
+_provider_instances_cache: Dict[str, AIProvider] = {}
+_DEFAULT_PROVIDER_NAME = "gemini" # Fallback default
 
-_providers: Dict[str, AIProvider] = {}
-_active_provider_name: str = "gemini"  # Default provider
+SUPPORTED_PROVIDERS: Dict[str, Type[AIProvider]] = {
+    "gemini": GeminiProvider,
+    "openai": OpenAIProvider,       # For direct OpenAI API
+    "claude": ClaudeProvider,
+    "fptai": FPTAIProvider,
+    # OpenRouter model providers
+    "deepseek-r1": DeepSeekR1Provider,
+    "sarvam": SarvamProvider,
+    "deepseek-chat": DeepSeekChatProvider,
+    "qwen3": Qwen3Provider,
+    "gemma3": Gemma3Provider,
+    # "old_openrouter": OldOpenRouterProvider, # Keep if needed for transition, otherwise remove
+}
 
-def initialize_providers():
-    """Initializes available providers based on configured API keys."""
-    global _providers
-    _providers = {} # Reset on initialization
+def _get_active_provider_name_from_db(session: Session) -> str:
+    config = get_ai_provider_config(session)
+    if config and config.active_provider_name in SUPPORTED_PROVIDERS:
+        return config.active_provider_name
+    
+    # If no config or invalid, set to default and return default
+    default_to_set = _DEFAULT_PROVIDER_NAME
+    for potential_default in [settings.DEFAULT_AI_PROVIDER, _DEFAULT_PROVIDER_NAME]: # Check settings first
+        if potential_default in SUPPORTED_PROVIDERS:
+            default_to_set = potential_default
+            
+    logger.warning(f"AI Config not found or invalid in DB. Setting and using default: {default_to_set}")
+    crud_set_ai_provider_config(session, default_to_set) # This commits
+    return default_to_set
 
-    provider_classes: Dict[str, Tuple[Type[AIProvider], str | None]] = {
-        "gemini": (GeminiProvider, settings.GEMINI_API_KEY),
-        "openai": (OpenAIProvider, settings.OPENAI_API_KEY),
-        "claude": (ClaudeProvider, settings.CLAUDE_API_KEY),
-        "fptai": (FPTAIProvider, settings.FPT_AI_API_KEY),
-        "openrouter": (OpenRouterProvider, settings.OPENROUTER_API_KEY),
-    }
+def get_ai_provider(session: Session) -> AIProvider:
+    active_provider_name = _get_active_provider_name_from_db(session)
 
-    for name, (provider_class, api_key) in provider_classes.items():
+    if active_provider_name not in _provider_instances_cache:
+        logger.info(f"AI Service: Initializing provider instance for {active_provider_name}")
+        if active_provider_name not in SUPPORTED_PROVIDERS:
+            logger.error(f"Misconfigured/Unsupported AI provider in DB: {active_provider_name}. Falling back to {_DEFAULT_PROVIDER_NAME}.")
+            active_provider_name = _DEFAULT_PROVIDER_NAME # Fallback logic
+            # Attempt to fix in DB for next time
+            crud_set_ai_provider_config(session, active_provider_name)
+
+        provider_class = SUPPORTED_PROVIDERS[active_provider_name]
+        api_key, api_base, model_name = None, None, None # model_name can be set per provider class default
+
+        if active_provider_name == "gemini":
+            api_key = settings.GEMINI_API_KEY
+        elif active_provider_name == "openai": # Direct OpenAI usage
+            api_key = settings.OPENAI_API_KEY
+            model_name = settings.OPENAI_DEFAULT_MODEL or "gpt-4o" # Default for direct OpenAI
+        elif active_provider_name in ["deepseek-r1", "sarvam", "deepseek-chat", "qwen3", "gemma3"]:
+            # All OpenRouter model providers
+            api_key = settings.OPENROUTER_API_KEY
+        elif active_provider_name == "claude":
+            api_key = settings.ANTHROPIC_API_KEY
+        elif active_provider_name == "fptai":
+            api_key = settings.FPT_AI_API_KEY
+            api_base = "https://mkp-api.fptcloud.com" # If FPT has a configurable base
+            model_name = "llama-3.3-70b-instruct" # FPT's default, as example
+
         try:
-            # Only initialize if the key is present, even if the constructor handles None
-            if api_key:
-                 _providers[name] = provider_class(api_key=api_key)
-                 logger.info(f"Initialized AI provider: {name}")
-            else:
-                logger.warning(f"API key for {name} not found. Provider not initialized.")
-        except Exception as e:
-            logger.error(f"Failed to initialize AI provider {name}: {e}", exc_info=True)
+            constructor_args = {"api_key": api_key, "api_base": api_base}
+            if active_provider_name in ["openai", "claude"]: # Providers that accept model_name
+                constructor_args["model_name"] = model_name
+            
+            _provider_instances_cache[active_provider_name] = provider_class(**constructor_args)
+            logger.info(f"AI Service: Provider {active_provider_name} initialized and cached.")
+        except ValueError as e: # Catch API key missing, etc.
+            logger.error(f"AI Service: Failed to initialize {active_provider_name}: {e}. Clearing from cache and re-raising.")
+            if active_provider_name in _provider_instances_cache:
+                del _provider_instances_cache[active_provider_name]
+            raise # Re-raise to signal failure to caller
+        except Exception as e_generic:
+            logger.error(f"AI Service: Generic error initializing {active_provider_name}: {e_generic}. Clearing and re-raising.", exc_info=True)
+            if active_provider_name in _provider_instances_cache:
+                del _provider_instances_cache[active_provider_name]
+            raise
+            
+    return _provider_instances_cache[active_provider_name]
+
+def get_ai_response(*, session: Session, character: Character, history: Sequence[Message]) -> str:
+    try:
+        provider = get_ai_provider(session=session)
+    except Exception as e_get_provider:
+        logger.error(f"Failed to get AI provider for {character.name}: {e_get_provider}", exc_info=True)
+        return character.fallback_response or "I'm having trouble reaching my AI brain at the moment."
+        
+    logger.info(f"Using AI provider: {provider.__class__.__name__} (model: {getattr(provider, 'model_name', 'N/A')}) for character {character.name}")
+    
+    # Removed character-specific model override logic.
+    # The provider instance fetched by get_ai_provider (using global settings) will always be used.
+            
+    return provider.get_response(character=character, history=history)
 
 def get_available_providers() -> List[str]:
-    """Returns a list of successfully initialized provider names."""
-    return list(_providers.keys())
+    available = []
+    # Use getattr to safely access API keys, providing None if the attribute doesn't exist.
+    # This prevents AttributeError if a key isn't defined in the Settings model or environment.
+    # The subsequent `if` check will correctly evaluate to false if the key is None or an empty string.
+    if getattr(settings, "GEMINI_API_KEY", None): available.append("gemini")
+    if getattr(settings, "OPENAI_API_KEY", None): available.append("openai")
+    if getattr(settings, "OPENROUTER_API_KEY", None): 
+        # Add all OpenRouter model providers if OpenRouter API key is configured
+        available.extend(["deepseek-r1", "sarvam", "deepseek-chat", "qwen3", "gemma3"])
+    if getattr(settings, "ANTHROPIC_API_KEY", None): available.append("claude")
+    if getattr(settings, "FPT_AI_API_KEY", None): available.append("fptai")
+    return sorted(list(set(available))) # Ensure unique and sorted
 
-def set_active_provider(provider_name: str) -> bool:
-    """Sets the active AI provider."""
-    global _active_provider_name
-    if provider_name in _providers:
-        _active_provider_name = provider_name
-        logger.info(f"Active AI provider set to: {provider_name}")
-        return True
-    else:
-        logger.error(f"Attempted to set active provider to unavailable service: {provider_name}")
-        return False
+def set_active_provider(name: str, session: Session) -> None:
+    if name not in SUPPORTED_PROVIDERS:
+        raise ValueError(f"Unsupported AI provider: {name}. Must be one of {list(SUPPORTED_PROVIDERS.keys())}")
+    if name not in get_available_providers():
+        raise ValueError(f"AI Provider '{name}' is not configured with necessary API keys/settings.")
+        
+    crud_set_ai_provider_config(session, name)
+    logger.info(f"AI Service: Active provider set to '{name}' in DB.")
+    
+    # Clear instance from cache to force re-initialization with new config if necessary
+    if name in _provider_instances_cache:
+        del _provider_instances_cache[name]
+        logger.info(f"AI Service: Cleared cached instance for {name}. It will be re-initialized on next use.")
+    # Clear all cached instances to be safe, as some providers might share base classes or settings
+    _provider_instances_cache.clear()
+    logger.info("AI Service: All provider instances cleared from cache due to active provider change.")
 
-def get_active_provider_name() -> str:
-    """Gets the name of the currently active AI provider."""
-    return _active_provider_name
+def get_active_ai_provider_name_from_service(session: Session) -> str:
+    return _get_active_provider_name_from_db(session)
 
+# Example of how a FastAPI dependency for session could be used (conceptual)
+# Needs to be defined in api.deps or similar
+# def get_ai_session() -> Session:
+#     with Session(engine) as session: # Assuming 'engine' is your SQLModel engine
+#         yield session
 
-# --- Main Service Function ---
+# To be called by routes in config.py:
+# get_active_ai_provider_name_from_service(session=SessionDep)
+# set_active_provider(name=provider_name, session=SessionDep)
 
-def get_ai_response(
-    *, character: Character, history: Sequence[Message]
-) -> str:
-    """
-    Gets a response from the currently active AI provider.
-
-    Args:
-        character: The character the user is talking to.
-        history: A sequence of recent messages in the conversation.
-
-    Returns:
-        A string containing the AI's response.
-    """
-    if not _providers:
-        logger.critical("No AI providers initialized. Trying to initialize now.")
-        initialize_providers()
-        if not _providers:
-             logger.error("AI Service unavailable: No providers could be initialized.")
-             return f"(OOC: AI Service is currently unavailable for {character.name}. No providers configured.)"
-
-    if _active_provider_name not in _providers:
-        logger.error(f"Active provider '{_active_provider_name}' is not available. Falling back to first available.")
-        # Fallback logic: try gemini first, then the first available one
-        fallback_order = ["gemini"] + get_available_providers()
-        for name in fallback_order:
-            if name in _providers:
-                logger.warning(f"Falling back to provider: {name}")
-                set_active_provider(name)
-                break
-        else:
-            # Should not happen if _providers is not empty, but safety check
-            logger.error("AI Service unavailable: Could not find any fallback provider.")
-            return f"(OOC: AI Service is currently unavailable for {character.name}. Fallback failed.)"
-
-    provider = _providers[_active_provider_name]
-
-    logger.info(f"Getting AI response for character '{character.name}' using provider: '{_active_provider_name}'")
-    logger.debug(f"History provided: {[(msg.sender, msg.content) for msg in history]}")
-
-    try:
-        response = provider.get_response(character=character, history=history)
-        logger.debug(f"AI Response received: {response}")
-        return response
-    except NotImplementedError:
-         logger.error(f"Provider '{_active_provider_name}' is not fully implemented.")
-         return f"(OOC: The selected AI provider ({_active_provider_name}) is not implemented yet for {character.name}.)"
-    except Exception as e:
-        logger.error(f"Error getting response from provider '{_active_provider_name}': {e}", exc_info=True)
-        return f"(OOC: Sorry, I encountered an error trying to respond as {character.name} using {_active_provider_name}.)"
+# To be called by message sending logic:
+# get_ai_response(session=SessionDep, character=..., history=...)
 
 # Initialize providers on module load
-initialize_providers() 
