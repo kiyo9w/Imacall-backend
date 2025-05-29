@@ -2,7 +2,31 @@
 
 This document describes the API endpoints for the Imacall application, based on the OpenAPI 3.1 specification available at `/api/v1/openapi.json`.
 
-**Base URL:** `https://imacall-backend.onrender.com/api/v1`
+**Base URL:** `https://imacall-backend-production.up.railway.app/api/v1`  
+**Alternative Base URL:** `https://imacall-backend.onrender.com/api/v1` (if specified)
+
+## 🚀 Current Status & Updates
+
+**✅ Fully Operational (Updated January 2025):**
+- Complete character management system with V3 personality fields
+- Multi-provider AI integration with fallback support
+- Working AI providers: Gemini 2.0 Flash, DeepSeek Chat V3, Qwen3 235B, Gemma3 27B
+- User authentication and admin management
+- Real-time conversation system
+- Database migrations completed with AI provider configuration
+
+**🔧 Recent Updates:**
+- **AI Provider System:** Upgraded to support multiple OpenRouter models
+- **Gemini Integration:** Updated to new `google-genai` package with Gemini 2.0 Flash
+- **Character Fallback Responses:** Added fallback system for AI failures
+- **Enhanced Character Fields:** Added comprehensive personality system (V3)
+- **Database Stability:** Resolved migration conflicts and ensured data integrity
+
+**⚡ AI Provider Status:**
+- **Recommended:** `deepseek-chat` (Most reliable OpenRouter model)
+- **Default:** `gemini` (Google Gemini 2.0 Flash)
+- **Also Working:** `qwen3`, `gemma3`
+- **Available:** All OpenRouter free models via single API key
 
 ---
 
@@ -322,36 +346,59 @@ This document describes the API endpoints for the Imacall application, based on 
 
 ## Characters
 
-**Character Schema (Simplified)**
+**Character Schema (Complete)**
 
 ```json
 {
   "id": "uuid",
-  "name": "string (max 100)",
-  "description": "string (text)",
+  "name": "string (max 100)", // Required
+  "description": "string (text, optional)",
   "image_url": "string (url, optional)",
   "greeting_message": "string (text, optional)",
   "scenario": "string (text, optional)",
   "category": "string (optional)",
   "language": "string (optional)",
-  "tags": ["string", "..."] (optional), 
-  "voice_id": "string (optional)",
-  "personality_traits": "string (text, optional)",
-  "writing_style": "string (text, optional)",
-  "background": "string (text, optional)",
-  "knowledge_scope": "string (text, optional)",
-  "quirks": "string (text, optional)",
-  "emotional_range": "string (text, optional)",
+  "tags": ["string", "..."] | "string" (optional), // Can be array or comma-separated string
+  "voice_id": "string (optional)", // For TTS integration
+  // V3 Personality Fields
+  "personality_traits": "string (text, optional)", // e.g., "Curious, Witty, Cautious"
+  "writing_style": "string (text, optional)", // e.g., "Formal, Concise, Uses emojis"
+  "background": "string (text, optional)", // Character's history
+  "knowledge_scope": "string (text, optional)", // What the character knows/doesn't know
+  "quirks": "string (text, optional)", // Unique habits or behaviors
+  "emotional_range": "string (text, optional)", // How the character expresses emotions
   "popularity_score": "integer (default 0)",
   "status": "string (pending | approved | rejected)",
-  "is_public": "boolean",
-  "is_featured": "boolean",
+  "is_public": "boolean (default true)",
+  "is_featured": "boolean (default false)",
   "creator_id": "uuid",
   "created_at": "datetime",
-  "updated_at": "datetime"
-  // admin_feedback is generally not shown in public responses
+  "updated_at": "datetime",
+  "admin_feedback": "string (text, optional)", // Only visible to admins
+  "fallback_response": "string (text, optional)" // Only visible to admins, used when AI fails
 }
 ```
+
+**Character Field Details:**
+
+- **Core Fields**: `name` (required), `description`, `image_url`, `greeting_message`
+- **Categorization**: `category`, `language`, `tags`, `voice_id`
+- **Scenario**: `scenario` - Context/setting for interactions
+- **Personality System** (V3):
+  - `personality_traits` - Core personality characteristics
+  - `writing_style` - How the character communicates
+  - `background` - Character's history and context
+  - `knowledge_scope` - What the character knows about
+  - `quirks` - Unique behaviors and habits
+  - `emotional_range` - How emotions are expressed
+- **Admin Fields**: `status`, `is_public`, `is_featured`, `admin_feedback`, `fallback_response`
+- **System Fields**: `id`, `creator_id`, `created_at`, `updated_at`, `popularity_score`
+
+**Notes:**
+- `tags` field supports both JSON array format `["tag1", "tag2"]` and comma-separated string `"tag1, tag2"`
+- `admin_feedback` and `fallback_response` are excluded from public API responses
+- All text fields (`description`, `greeting_message`, `scenario`, personality fields) use TEXT columns for unlimited length
+- `fallback_response` is used when AI providers fail to generate responses
 
 **Endpoints:**
 
@@ -580,7 +627,7 @@ This document describes the API endpoints for the Imacall application, based on 
 ### Send Message
 
 *   **Endpoint:** `POST /conversations/{conversation_id}/messages`
-*   **Description:** Send a message from the user to the specified conversation. The backend will typically generate and return the character's response message.
+*   **Description:** Send a message from the user to the specified conversation. The backend will automatically generate and return the character's AI response using the active AI provider. If the AI provider fails, the character's fallback response will be used.
 *   **Authentication:** Requires `Authorization: Bearer <token>`.
 *   **Parameters:**
     *   `conversation_id`: `string` (Path parameter, UUID format) *Required*
@@ -597,15 +644,29 @@ This document describes the API endpoints for the Imacall application, based on 
           "content": "AI response text...",
           "id": "...", // ID of the AI's message
           "conversation_id": "...",
-          "sender": "character",
+          "sender": "ai",
           "timestamp": "..."
         }
         ```
+        
+        **AI Response Details:**
+        - Uses the currently active AI provider (default: `gemini`)
+        - Response incorporates character's personality traits, writing style, and background
+        - If AI provider fails, uses character's `fallback_response` field
+        - Responses are generated in real-time (typically 2-5 seconds)
+        
     *   `401 Unauthorized`: Not authenticated.
     *   `403 Forbidden`: Conversation does not belong to the user.
     *   `404 Not Found`: Conversation or associated character not found.
-    *   `422 Unprocessable Entity`: Validation error (e.g., message content too long).
-    *   `5xx Server Error`: Potential error during AI response generation.
+    *   `422 Unprocessable Entity`: Validation error (e.g., message content too long or empty).
+    *   `500 Internal Server Error`: AI provider error (fallback response will be used if available).
+
+**AI Integration Notes:**
+- The system automatically stores both the user message and AI response
+- AI responses use the character's complete personality profile (V3 system)
+- Multiple AI providers ensure high availability
+- Character-specific fallback responses prevent service interruption
+- Response quality varies by provider (DeepSeek Chat V3 recommended for consistency)
 
 ### Delete Conversation
 
@@ -653,19 +714,49 @@ This document describes the API endpoints for the Imacall application, based on 
 
 *Requires superuser privileges for all endpoints.*
 
+### AI Providers Overview
+
+The system supports multiple AI providers for character responses:
+
+**Core Providers:**
+- **`gemini`** - Google Gemini 2.0 Flash (New API format with `google-genai` package)
+- **`openai`** - Direct OpenAI GPT-4o access  
+- **`claude`** - Anthropic Claude 3 Haiku (Placeholder - not fully implemented)
+- **`fptai`** - FPT AI Llama 3.3 70B Instruct
+
+**OpenRouter Model Providers** (via OpenRouter API):
+- **`deepseek-r1`** - DeepSeek R1 0528 Qwen3 8B (Free)
+- **`sarvam`** - Sarvam M (Free) 
+- **`deepseek-chat`** - DeepSeek Chat V3 0324 (Free) ✅ **Reliable & Working**
+- **`qwen3`** - Qwen 3 235B A22B (Free) ✅ **Working**
+- **`gemma3`** - Google Gemma 3 27B IT (Free) ✅ **Working**
+
+**Provider Status:**
+- ✅ **Working Perfectly**: `gemini`, `deepseek-chat`, `qwen3`, `gemma3`
+- ⚠️ **Available but Issues**: `sarvam` (may have model-specific quirks), `deepseek-r1`
+- 🚧 **Not Implemented**: `claude`, `fptai`
+- 🔧 **Direct APIs**: `openai` (requires OpenAI API key)
+
+**Default Provider**: `gemini` (Gemini 2.0 Flash)
+
 ### Get Available AI Providers
 
 *   **Endpoint:** `GET /config/ai/providers/available`
-*   **Description:** Get a list of available (initialized with API keys) AI provider names.
+*   **Description:** Get a list of available (configured with API keys) AI provider names.
 *   **Authentication:** Requires `Authorization: Bearer <token>` (Superuser).
 *   **Responses:**
     *   `200 OK`: List of available provider names.
         ```json
         [
           "gemini",
-          "openai" 
+          "deepseek-r1",
+          "sarvam", 
+          "deepseek-chat",
+          "qwen3",
+          "gemma3"
         ]
         ```
+        *Note: The actual list depends on which API keys are configured in the environment.*
     *   `401 Unauthorized`/`403 Forbidden`: Not authenticated or insufficient permissions.
 
 ### Get Active AI Provider
@@ -686,7 +777,19 @@ This document describes the API endpoints for the Imacall application, based on 
 *   **Description:** Set the active AI provider. The provider name must be one of the available providers.
 *   **Authentication:** Requires `Authorization: Bearer <token>` (Superuser).
 *   **Parameters:**
-    *   `provider_name`: `string` (Query parameter) *Required* - The name of the provider to activate (e.g., "gemini", "openai").
+    *   `provider_name`: `string` (Query parameter) *Required* - The name of the provider to activate.
+        
+        **Valid Values:**
+        - `"gemini"` - Google Gemini 2.0 Flash
+        - `"openai"` - OpenAI GPT-4o (if API key configured)
+        - `"deepseek-r1"` - DeepSeek R1 via OpenRouter
+        - `"sarvam"` - Sarvam M via OpenRouter  
+        - `"deepseek-chat"` - DeepSeek Chat V3 via OpenRouter (Recommended)
+        - `"qwen3"` - Qwen 3 235B via OpenRouter
+        - `"gemma3"` - Gemma 3 27B via OpenRouter
+        - `"claude"` - Claude 3 Haiku (if implemented)
+        - `"fptai"` - FPT AI (if implemented)
+        
 *   **Responses:**
     *   `200 OK`: Provider activated successfully.
         ```json
@@ -694,30 +797,116 @@ This document describes the API endpoints for the Imacall application, based on 
           "message": "Active AI provider set to 'gemini'"
         }
         ```
-    *   `400 Bad Request`: The specified provider name is not available or initialized.
+    *   `400 Bad Request`: The specified provider name is not available or not configured with API keys.
     *   `401 Unauthorized`/`403 Forbidden`: Not authenticated or insufficient permissions.
     *   `422 Unprocessable Entity`: Invalid query parameter.
 
+**Required Environment Variables:**
+- `GEMINI_API_KEY` - For Gemini provider
+- `OPENAI_API_KEY` - For OpenAI provider  
+- `OPENROUTER_API_KEY` - For all OpenRouter model providers (deepseek-r1, sarvam, deepseek-chat, qwen3, gemma3)
+- `ANTHROPIC_API_KEY` - For Claude provider
+- `FPT_AI_API_KEY` - For FPT AI provider
+
 ---
 
-## Schemas (Simplified Overview)
+## Schemas (Complete Overview)
 
+**Authentication & Users:**
 *   **Token:** `{ access_token: string, token_type: 'bearer' }`
 *   **UserPublic:** `{ email, is_active, is_superuser, full_name, id }`
 *   **UserCreate (Admin):** `{ email, password, is_active?, is_superuser?, full_name? }`
 *   **UserRegister (Public):** `{ email, password, full_name? }`
 *   **UserUpdateMe:** `{ full_name?, email? }`
 *   **UpdatePassword:** `{ current_password, new_password }`
-*   **CharacterPublic:** `{ name, description?, image_url?, greeting_message?, id, status, creator_id, category?, tags?, averageRating?, ratingCount?, isPublic?, createdAt?, updatedAt? }`
-*   **CharacterCreate:** `{ name, description?, image_url?, greeting_message?, category?, tags?, scenario?, language? }`
-*   **CharacterUpdateAdmin:** `{ name?, description?, image_url?, greeting_message?, status?, category?, tags?, scenario?, language?, isPublic?, adminFeedback? }`
+
+**Characters:**
+*   **CharacterPublic:** 
+    ```json
+    { 
+      "id": "uuid", 
+      "name": "string (max 100)",
+      "description": "string?", 
+      "image_url": "string?", 
+      "greeting_message": "string?",
+      "scenario": "string?",
+      "category": "string?", 
+      "language": "string?",
+      "tags": ["string"] | "string"?,
+      "voice_id": "string?",
+      "personality_traits": "string?",
+      "writing_style": "string?", 
+      "background": "string?",
+      "knowledge_scope": "string?",
+      "quirks": "string?",
+      "emotional_range": "string?",
+      "popularity_score": "integer",
+      "status": "pending|approved|rejected",
+      "is_public": "boolean",
+      "is_featured": "boolean", 
+      "creator_id": "uuid",
+      "created_at": "datetime",
+      "updated_at": "datetime"
+      // admin_feedback & fallback_response excluded from public view
+    }
+    ```
+*   **CharacterCreate:** 
+    ```json
+    { 
+      "name": "string (required)",
+      "description": "string?", 
+      "image_url": "string?",
+      "greeting_message": "string?", 
+      "scenario": "string?",
+      "category": "string?",
+      "language": "string?",
+      "tags": ["string"] | "string"?,
+      "voice_id": "string?",
+      "personality_traits": "string?",
+      "writing_style": "string?",
+      "background": "string?",
+      "knowledge_scope": "string?", 
+      "quirks": "string?",
+      "emotional_range": "string?"
+    }
+    ```
+*   **CharacterUpdateAdmin:** `{ name?, description?, image_url?, greeting_message?, status?, category?, tags?, scenario?, language?, personality_traits?, writing_style?, background?, knowledge_scope?, quirks?, emotional_range?, is_public?, is_featured?, admin_feedback?, fallback_response? }`
 *   **CharactersPublic:** `{ data: CharacterPublic[], count: integer }`
-*   **ConversationPublic:** `{ id, user_id, character_id, created_at, lastInteractionAt?, characterName?, characterImageUrl? }`
+
+**Conversations:**
+*   **ConversationPublic:** `{ id, user_id, character_id, created_at, last_interaction_at?, character_name?, character_image_url? }`
 *   **ConversationCreate:** `{ character_id }`
 *   **ConversationsPublic:** `{ data: ConversationPublic[], count: integer }`
-*   **MessagePublic:** `{ content, id, conversation_id, sender: ('user'|'character'|'system'), timestamp }`
-*   **MessageCreate:** `{ content }`
-*   **MessagesPublic:** `{ data: MessagePublic[], count: integer }`
-*   **HTTPValidationError:** Standard FastAPI validation error response.
 
-*(Note: Optional fields indicated by `?`. Default values and constraints like string lengths are omitted for brevity but present in the full schema.)*
+**Messages:**
+*   **MessagePublic:** 
+    ```json
+    { 
+      "content": "string (max 5000)", 
+      "id": "uuid", 
+      "conversation_id": "uuid", 
+      "sender": "user|ai", 
+      "timestamp": "datetime" 
+    }
+    ```
+*   **MessageCreate:** `{ content: "string (max 5000)" }`
+*   **MessagesPublic:** `{ data: MessagePublic[], count: integer }`
+
+**AI Configuration:**
+*   **AIProviderConfigPublic:** `{ active_provider_name: string }`
+*   **Available Providers:** Array of strings from: `["gemini", "openai", "deepseek-r1", "sarvam", "deepseek-chat", "qwen3", "gemma3", "claude", "fptai"]`
+
+**Enums:**
+*   **CharacterStatus:** `"pending" | "approved" | "rejected"`
+*   **MessageSender:** `"user" | "ai"`
+
+**Validation & Errors:**
+*   **HTTPValidationError:** Standard FastAPI validation error response with `detail` array containing location, message, and type information.
+
+**Field Notes:**
+- Optional fields indicated by `?`
+- All `id` fields are UUID format
+- Text fields (`description`, `greeting_message`, `scenario`, personality fields) support unlimited length
+- `tags` field accepts both JSON arrays and comma-separated strings
+- `timestamp` and date fields are ISO 8601 datetime strings
+- `sender` field in messages uses `"ai"` (not `"character"`) for consistency
