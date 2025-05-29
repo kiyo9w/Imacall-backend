@@ -1,0 +1,16 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+**Feature Implementation Guide:**
+
+When adding a new feature (e.g., user ratings, voice calls):
+
+1.  **Plan:** Reference `development-plan.md` and `api-documentation.md` to understand scope and existing patterns.
+2.  **Model:** If database changes are needed, update `models.py` first (e.g., add new tables or fields).
+3.  **CRUD:** Implement corresponding data access logic in the relevant `crud/` file (e.g., `crud/characters.py`, `crud/conversations.py`).
+4.  **API:** Define new or modify existing endpoints in `api/routes/`. Ensure correct request/response models from `models.py`, use `SessionDep`, and apply security (`CurrentUser`, `get_current_active_superuser` from `api/deps.py`). Register new routers in `api/main.py`.
+5.  **Documentation:** Update `api-documentation.md` to reflect API changes.
+6.  **Quality:** Write clean, robust, and maintainable code. Do not introduce temporary fixes, hallucinate functionality, or leave layers (model, CRUD, API) incomplete. Ensure consistency across the stack.
+

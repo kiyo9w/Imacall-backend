@@ -320,119 +320,63 @@ This document describes the API endpoints for the Imacall application, based on 
 
 ---
 
-## Characters (`/characters`)
+## Characters
 
-### List Approved Characters (Public)
+**Character Schema (Simplified)**
 
-*   **Endpoint:** `GET /characters/`
-*   **Description:** Retrieve a list of publicly available, approved characters.
-*   **Parameters:**
-    *   `skip`: `integer` (Query, Default: 0)
-    *   `limit`: `integer` (Query, Default: 100)
-    *   *(Note: API spec doesn't explicitly show filters like category, tags, search, sort - these might be handled client-side or undocumented)*
-*   **Responses:**
-    *   `200 OK`: List of approved characters (`CharactersPublic` schema).
-        ```json
-        {
-          "data": [
-            {
-              "name": "string",
-              "description": "string",
-              "image_url": "string",
-              "greeting_message": "string",
-              "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-              "status": "approved", // Will always be 'approved' for this endpoint
-              "creator_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
-              // Potentially includes other fields like category, tags, averageRating, ratingCount, etc.
-            }
-          ],
-          "count": 0 // Total number of approved characters
-        }
-        ```
-    *   `422 Unprocessable Entity`: Invalid query parameters.
+```json
+{
+  "id": "uuid",
+  "name": "string (max 100)",
+  "description": "string (text)",
+  "image_url": "string (url, optional)",
+  "greeting_message": "string (text, optional)",
+  "scenario": "string (text, optional)",
+  "category": "string (optional)",
+  "language": "string (optional)",
+  "tags": ["string", "..."] (optional), 
+  "voice_id": "string (optional)",
+  "personality_traits": "string (text, optional)",
+  "writing_style": "string (text, optional)",
+  "background": "string (text, optional)",
+  "knowledge_scope": "string (text, optional)",
+  "quirks": "string (text, optional)",
+  "emotional_range": "string (text, optional)",
+  "popularity_score": "integer (default 0)",
+  "status": "string (pending | approved | rejected)",
+  "is_public": "boolean",
+  "is_featured": "boolean",
+  "creator_id": "uuid",
+  "created_at": "datetime",
+  "updated_at": "datetime"
+  // admin_feedback is generally not shown in public responses
+}
+```
 
-### Get Approved Character by ID (Public)
+**Endpoints:**
 
-*   **Endpoint:** `GET /characters/{id}`
-*   **Description:** Get details for a specific publicly available, approved character.
-*   **Parameters:**
-    *   `id`: `string` (Path parameter, UUID format) *Required*
-*   **Responses:**
-    *   `200 OK`: Character details (`CharacterPublic` schema).
-        ```json
-        {
-          "name": "string",
-          "description": "string",
-          "image_url": "string",
-          "greeting_message": "string",
-          "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-          "status": "approved",
-          "creator_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
-          // Potentially includes other fields
-        }
-        ```
-    *   `404 Not Found`: Character not found or is not approved/public.
-    *   `422 Unprocessable Entity`: Invalid UUID format.
+1.  **`GET /characters/` (Public)**
+    *   **Description:** Retrieves a list of publicly available and approved characters.
+    *   **Authentication:** Not required.
+    *   **Query Parameters:** `skip` (int, default 0), `limit` (int, default 100).
+    *   **Response:** `CharactersPublic` (contains a list of `CharacterPublic` objects and total count).
 
-### Submit Character for Review
+2.  **`GET /characters/my-submissions`**
+    *   **Description:** Retrieves characters submitted by the currently authenticated user (any status).
+    *   **Authentication:** Required.
+    *   **Query Parameters:** `skip` (int, default 0), `limit` (int, default 100).
+    *   **Response:** `CharactersPublic`.
 
-*   **Endpoint:** `POST /characters/submit`
-*   **Description:** Submit a new character definition. It will be created with `pending` status and requires admin approval.
-*   **Authentication:** Requires `Authorization: Bearer <token>`.
-*   **Request Body:** `application/json` (`CharacterCreate` schema)
-    ```json
-    {
-      "name": "string", // Required (max 100 chars)
-      "description": "string", // Optional
-      "image_url": "string", // Optional (URL)
-      "greeting_message": "string", // Optional
-      // Other fields like category, tags, scenario, language might be included here based on schema evolution
-    }
-    ```
-*   **Responses:**
-    *   `201 Created`: Character submitted successfully. Returns the created character details (`CharacterPublic` schema) with `pending` status.
-        ```json
-        {
-          "name": "string",
-          "description": "string",
-          "image_url": "string",
-          "greeting_message": "string",
-          "id": "...",
-          "status": "Pending", // Corrected based on frontend types
-          "creator_id": "..."
-          // etc.
-        }
-        ```
-    *   `401 Unauthorized`: Not authenticated.
-    *   `422 Unprocessable Entity`: Validation error (e.g., name too long).
+3.  **`GET /characters/{id}` (Public)**
+    *   **Description:** Retrieves a specific approved character by its ID.
+    *   **Authentication:** Not required.
+    *   **Response:** `CharacterPublic` or 404 if not found or not approved.
 
-### List My Character Submissions
-
-*   **Endpoint:** `GET /characters/my-submissions`
-*   **Description:** Retrieve all characters submitted by the currently authenticated user, regardless of their status (Pending, Approved, Rejected).
-*   **Authentication:** Requires `Authorization: Bearer <token>`.
-*   **Parameters:**
-    *   `skip`: `integer` (Query, Default: 0)
-    *   `limit`: `integer` (Query, Default: 100)
-*   **Responses:**
-    *   `200 OK`: List of the user's character submissions (`CharactersPublic` schema).
-        ```json
-        {
-          "data": [
-            {
-              "name": "string",
-              "description": "string",
-              // ... other CharacterPublic fields ...
-              "id": "...",
-              "status": "Pending", // or "Approved", "Rejected"
-              "creator_id": "..." // Will match the authenticated user's ID
-            }
-          ],
-          "count": 0 // Total number of submissions by the user
-        }
-        ```
-    *   `401 Unauthorized`: Not authenticated.
-    *   `422 Unprocessable Entity`: Invalid query parameters.
+4.  **`POST /characters/submit`**
+    *   **Description:** Submits a new character for review. Status defaults to `pending`.
+    *   **Authentication:** Required.
+    *   **Request Body:** `CharacterCreate` (requires `name`, other fields are optional, text fields have no strict length limit).
+    *   **Response:** `CharacterPublic` (the created character data).
 
 ---
 
@@ -702,6 +646,57 @@ This document describes the API endpoints for the Imacall application, based on 
         ```json
         true
         ```
+
+---
+
+## Configuration (`/config`)
+
+*Requires superuser privileges for all endpoints.*
+
+### Get Available AI Providers
+
+*   **Endpoint:** `GET /config/ai/providers/available`
+*   **Description:** Get a list of available (initialized with API keys) AI provider names.
+*   **Authentication:** Requires `Authorization: Bearer <token>` (Superuser).
+*   **Responses:**
+    *   `200 OK`: List of available provider names.
+        ```json
+        [
+          "gemini",
+          "openai" 
+        ]
+        ```
+    *   `401 Unauthorized`/`403 Forbidden`: Not authenticated or insufficient permissions.
+
+### Get Active AI Provider
+
+*   **Endpoint:** `GET /config/ai/providers/active`
+*   **Description:** Get the name of the currently active AI provider used for generating responses.
+*   **Authentication:** Requires `Authorization: Bearer <token>` (Superuser).
+*   **Responses:**
+    *   `200 OK`: Name of the active provider.
+        ```json
+        "gemini"
+        ```
+    *   `401 Unauthorized`/`403 Forbidden`: Not authenticated or insufficient permissions.
+
+### Set Active AI Provider
+
+*   **Endpoint:** `PUT /config/ai/providers/active`
+*   **Description:** Set the active AI provider. The provider name must be one of the available providers.
+*   **Authentication:** Requires `Authorization: Bearer <token>` (Superuser).
+*   **Parameters:**
+    *   `provider_name`: `string` (Query parameter) *Required* - The name of the provider to activate (e.g., "gemini", "openai").
+*   **Responses:**
+    *   `200 OK`: Provider activated successfully.
+        ```json
+        {
+          "message": "Active AI provider set to 'gemini'"
+        }
+        ```
+    *   `400 Bad Request`: The specified provider name is not available or initialized.
+    *   `401 Unauthorized`/`403 Forbidden`: Not authenticated or insufficient permissions.
+    *   `422 Unprocessable Entity`: Invalid query parameter.
 
 ---
 
