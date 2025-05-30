@@ -195,6 +195,27 @@ class CharacterCreate(CharacterBase):
     pass
 
 
+# Properties to receive via API on update (user only - excludes admin fields)
+class CharacterUpdateUser(SQLModel):
+    """Schema for regular users to update their own characters - excludes admin-only fields"""
+    name: str | None = Field(default=None, max_length=100)
+    description: str | None = None
+    image_url: str | None = None
+    greeting_message: str | None = None
+    scenario: str | None = None
+    category: str | None = None
+    language: str | None = None
+    tags: list[str] | None = None
+    voice_id: str | None = None
+    personality_traits: str | None = None
+    writing_style: str | None = None
+    background: str | None = None
+    knowledge_scope: str | None = None
+    quirks: str | None = None
+    emotional_range: str | None = None
+    # Note: status, is_public, is_featured, admin_feedback, fallback_response are excluded
+
+
 # Properties to receive via API on update (admin only)
 class CharacterUpdate(SQLModel):
     # Only include fields a user OR admin might update
@@ -220,6 +241,11 @@ class CharacterUpdate(SQLModel):
     is_featured: bool | None = None
     admin_feedback: str | None = None
     fallback_response: str | None = None
+
+
+# Schema for rejecting characters with optional feedback
+class CharacterRejectRequest(SQLModel):
+    admin_feedback: str | None = None
 
 
 # Database model
